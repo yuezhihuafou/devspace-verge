@@ -1,0 +1,17 @@
+[Unit]
+Description=DevSpace MCP server (personal fork)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+Environment=HOME=@HOME_DIR@
+Environment=PATH=@NODE_DIR@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@NODE_BIN@ @REPO_ROOT@/dist/cli.js serve
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

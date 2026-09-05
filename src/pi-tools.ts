@@ -10,7 +10,10 @@ import {
   type WriteToolInput,
   type AgentToolResult,
 } from "@earendil-works/pi-coding-agent";
+import { performance } from "node:perf_hooks";
 import { resolveAllowedPath } from "./roots.js";
+import { handleRunLogCommand } from "./compact-runtime/run-log-access.js";
+import { persistShellRun } from "./compact-runtime/run-store.js";
 
 type McpContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResponse<TDetails = unknown> = {
@@ -92,11 +95,50 @@ export async function editFileTool(input: EditToolInput, context: ToolContext): 
 }
 
 export async function runShellTool(input: BashToolInput, context: ToolContext): Promise<ToolResponse> {
+  try {
+    const runLogResult = await handleRunLogCommand(input.command);
+    if (runLogResult !== null) {
+      return { content: [{ type: "text", text: runLogResult }] };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { content: [{ type: "text", text: message }], isError: true };
+  }
+
+  const startedAt = performance.now();
   const tool = createBashTool(context.cwd);
   const timeout = input.timeout === undefined ? 30 : Math.min(input.timeout, 300);
 
-  return runTool((params) => tool.execute("run_shell", params), {
+  const response = await runTool((params) => tool.execute("run_shell", params), {
     command: input.command,
     timeout,
   }, context);
+
+  const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+  try {
+    const stored = await persistShellRun({ input, context, response, durationMs });
+    return {
+      ...response,
+      content: [{ type: "text", text: stored.compactText }],
+      details: {
+        ...(response.details ?? {}),
+        devspaceCompact: {
+          runId: stored.runId,
+          outputBytes: stored.meta.outputBytes,
+          outputLines: stored.meta.outputLines,
+          exitCode: stored.meta.exitCode,
+          fullLogPath: stored.meta.outputPath,
+        },
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ...response,
+      content: [
+        { type: "text", text: `compact-log-store-failed: ${message}` },
+        ...response.content,
+      ],
+    };
+  }
 }

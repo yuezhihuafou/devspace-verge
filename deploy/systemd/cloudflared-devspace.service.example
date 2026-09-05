@@ -1,0 +1,16 @@
+[Unit]
+Description=Cloudflare Tunnel for DevSpace
+After=network-online.target devspace.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=HOME=%h
+ExecStart=/usr/local/bin/cloudflared tunnel run --protocol http2 --token-file=%h/.config/cloudflared/devspace.token
+Restart=always
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
