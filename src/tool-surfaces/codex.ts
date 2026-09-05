@@ -1,5 +1,6 @@
 import * as z from "zod/v4";
 import { applyPatch } from "../apply-patch.js";
+import { handleRunLogCommand } from "../compact-runtime/run-log-access.js";
 import { compactPreview } from "../compact-runtime/output-policy.js";
 import type { ProcessSnapshot } from "../process-sessions.js";
 import {
@@ -45,6 +46,7 @@ function processResult(snapshot: ProcessSnapshot): string {
   ];
   const preview = compactPreview(snapshot.output, isError, snapshot.command);
   if (preview) lines.push(preview);
+  if (snapshot.logError) lines.push(`log_error=${snapshot.logError}`);
   lines.push(`log=${snapshot.runId}; more=devspace-log read ${snapshot.runId} 1 80 | grep ${snapshot.runId} <pattern>`);
   return lines.join("\n");
 }
@@ -60,6 +62,7 @@ function processOutputSchema(): z.ZodRawShape {
     outputBytes: z.number().nonnegative(),
     outputLines: z.number().nonnegative(),
     outputTruncated: z.boolean(),
+    logError: z.string().optional(),
   });
 }
 
@@ -79,6 +82,23 @@ function processToolResponse(snapshot: ProcessSnapshot) {
       outputBytes: snapshot.outputBytes,
       outputLines: snapshot.outputLines,
       outputTruncated: snapshot.outputTruncated,
+      logError: snapshot.logError,
+    },
+  };
+}
+
+function runLogToolResponse(command: string, result: string) {
+  const runId = command.trim().split(/\s+/)[2] ?? "run_unknown";
+  return {
+    content: [textBlock(result)],
+    structuredContent: {
+      result,
+      runId,
+      running: false,
+      wallTimeMs: 0,
+      outputBytes: Buffer.byteLength(result, "utf8"),
+      outputLines: result === "" ? 0 : result.split(/\r?\n/).length,
+      outputTruncated: false,
     },
   };
 }
@@ -143,7 +163,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Execute command",
       description:
-        "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Full output is persisted locally; the MCP result is compact and includes a runId. Returns a sessionId when the process is still running.",
+        "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Full output is persisted locally; the MCP result is compact and includes a runId. Returns a sessionId when the process is still running. devspace-log commands are handled internally for bounded log retrieval.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -158,6 +178,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, cmd, tty, columns, rows, workingDirectory, yieldTimeMs, maxOutputTokens }) => {
+      workspaces.getWorkspace(workspaceId);
+      const runLogResult = await handleRunLogCommand(cmd);
+      if (runLogResult !== null) return runLogToolResponse(cmd, runLogResult);
+
       const startedAt = performance.now();
       const snapshot = await runLoggedToolOperation(
         config,
