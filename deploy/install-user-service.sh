@@ -35,8 +35,14 @@ mkdir -p "$service_dir"
 node_dir=$(dirname "$(readlink -f "$node_bin")")
 template="$repo_root/deploy/systemd/devspace.service.in"
 unit_path="$service_dir/devspace.service"
+backup_path="$service_dir/devspace.service.pre-personal-fork"
 tmp_path=$(mktemp "$service_dir/devspace.service.XXXXXX")
 trap 'rm -f "$tmp_path"' EXIT
+
+if [[ -f "$unit_path" && ! -f "$backup_path" ]]; then
+  cp -p "$unit_path" "$backup_path"
+  echo "Saved previous service as $backup_path"
+fi
 
 sed \
   -e "s|@REPO_ROOT@|$repo_root|g" \
@@ -57,4 +63,7 @@ systemctl --user enable devspace.service
 systemctl --user restart devspace.service
 
 echo "Installed and started $unit_path"
+if [[ -f "$backup_path" ]]; then
+  echo "Rollback backup: $backup_path"
+fi
 systemctl --user --no-pager --full status devspace.service
