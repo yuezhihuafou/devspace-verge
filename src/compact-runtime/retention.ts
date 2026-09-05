@@ -25,6 +25,7 @@ interface StoredRun {
   runId: string;
   path: string;
   bytes: number;
+  completed: boolean;
 }
 
 async function listRuns(root: string): Promise<StoredRun[]> {
@@ -45,11 +46,13 @@ async function listRuns(root: string): Promise<StoredRun[]> {
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^run_[A-Za-z0-9_]+$/.test(entry.name)) continue;
       const runPath = path.join(dayPath, entry.name);
+      const runEntries = await readdir(runPath);
       runs.push({
         day,
         runId: entry.name,
         path: runPath,
         bytes: await directoryBytes(runPath),
+        completed: runEntries.includes("meta.json"),
       });
     }
   }
@@ -92,7 +95,7 @@ export async function pruneRunStore(input: {
   let runs = await listRuns(input.root);
 
   for (const run of runs) {
-    if (run.runId === input.protectRunId) continue;
+    if (!run.completed || run.runId === input.protectRunId) continue;
     const dayTime = Date.parse(`${run.day}T00:00:00Z`);
     if (Number.isFinite(dayTime) && dayTime < cutoff) {
       await rm(run.path, { recursive: true, force: true });
@@ -103,7 +106,7 @@ export async function pruneRunStore(input: {
   let total = runs.reduce((sum, run) => sum + run.bytes, 0);
   for (const run of runs) {
     if (total <= maxBytes) break;
-    if (run.runId === input.protectRunId) continue;
+    if (!run.completed || run.runId === input.protectRunId) continue;
     await rm(run.path, { recursive: true, force: true });
     total -= run.bytes;
   }
