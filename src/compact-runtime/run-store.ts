@@ -11,6 +11,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
+import { compactPreview } from "./output-policy.js";
 
 export interface ShellInput {
   command: string;
@@ -77,49 +78,6 @@ function parseExitCode(text: string, isError: boolean): number | null {
   const match = text.match(/Command exited with code\s+(\d+)/i);
   if (match) return Number.parseInt(match[1], 10);
   return isError ? null : 0;
-}
-
-function tailLines(text: string, count: number): string {
-  if (!text) return "";
-  const lines = text.split(/\r?\n/);
-  return lines.slice(Math.max(0, lines.length - count)).join("\n");
-}
-
-function commandClass(command: string): "inspection" | "verification" | "default" {
-  const normalized = command.trim().toLowerCase();
-  if (/^(rg|grep|find|ls|tree|git\s+(status|diff|log|show|branch|rev-parse)|pwd|which|type|head|tail|wc)\b/.test(normalized)) {
-    return "inspection";
-  }
-  if (/\b(pytest|ctest|colcon\s+build|cmake\s+--build|make|ninja|npm\s+(test|run\s+(test|build|lint))|pnpm\s+(test|run\s+(test|build|lint)))\b/.test(normalized)) {
-    return "verification";
-  }
-  return "default";
-}
-
-function compactPreview(text: string, isError: boolean, command: string): string {
-  const kind = commandClass(command);
-  let maxChars = 900;
-  let maxLines = 10;
-  if (kind === "inspection") {
-    maxChars = 5000;
-    maxLines = 120;
-  } else if (kind === "verification") {
-    maxChars = 700;
-    maxLines = 8;
-  }
-  if (isError) {
-    maxChars = Math.max(maxChars, 2200);
-    maxLines = Math.max(maxLines, 30);
-  }
-  const lines = text.split(/\r?\n/);
-  const selected = kind === "inspection" && !isError
-    ? lines.slice(0, maxLines).join("\n").trim()
-    : tailLines(text, maxLines).trim();
-  if (!selected) return "";
-  if (selected.length <= maxChars) return selected;
-  return kind === "inspection" && !isError
-    ? `${selected.slice(0, maxChars)}\n…`
-    : `…\n${selected.slice(-maxChars)}`;
 }
 
 function upstreamFullOutputPath(text: string): string | null {
@@ -264,7 +222,7 @@ export async function persistShellRun({
     `run=${runId} status=${status}${exitCode === null ? "" : ` exit=${exitCode}`} duration=${durationMs}ms output=${fileSummary.outputLines}L/${fileSummary.outputBytes}B`,
   ];
   if (preview) lines.push(preview);
-  lines.push(`log=${runId}; more=devspace-log read ${runId} 1 80 | grep ${runId} <pattern>`);
+  lines.push(`log=${runId}; more=devspace-log read ${runId} 1 80; search=devspace-log grep ${runId} <pattern>`);
 
   try {
     await maybePruneRunStore(root, now.getTime());
