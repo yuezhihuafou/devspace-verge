@@ -1,17 +1,10 @@
 import { createReadStream } from "node:fs";
-import {
-  chmod,
-  copyFile,
-  mkdir,
-  readdir,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
 import { compactPreview } from "./output-policy.js";
+import { pruneRunStore } from "./retention.js";
 
 export interface ShellInput {
   command: string;
@@ -49,18 +42,9 @@ export interface ShellRunMetadata {
 }
 
 const DEFAULT_ROOT = path.join(homedir(), ".local", "share", "devspace", "runs");
-const DEFAULT_RETENTION_DAYS = 30;
-const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
-const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
-let lastPruneAt = 0;
 
 export function runStoreRoot(): string {
   return process.env.DEVSPACE_COMPACT_RUN_ROOT || DEFAULT_ROOT;
-}
-
-function positiveIntegerEnv(name: string, fallback: number): number {
-  const parsed = Number.parseInt(process.env[name] ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function safeIsoDate(date = new Date()): string {
@@ -122,52 +106,6 @@ async function persistOutputFile(modelVisibleText: string, outputPath: string): 
   return { recovered: false, upstreamPath };
 }
 
-async function directoryBytes(dir: string): Promise<number> {
-  let total = 0;
-  const entries = await readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const child = path.join(dir, entry.name);
-    if (entry.isDirectory()) total += await directoryBytes(child);
-    else if (entry.isFile()) total += (await stat(child)).size;
-  }
-  return total;
-}
-
-async function maybePruneRunStore(root: string, now: number): Promise<void> {
-  if (now - lastPruneAt < PRUNE_INTERVAL_MS) return;
-  lastPruneAt = now;
-  let dayEntries: string[];
-  try {
-    dayEntries = (await readdir(root, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
-      .map((entry) => entry.name)
-      .sort();
-  } catch {
-    return;
-  }
-
-  const retentionDays = positiveIntegerEnv("DEVSPACE_COMPACT_LOG_RETENTION_DAYS", DEFAULT_RETENTION_DAYS);
-  const maxBytes = positiveIntegerEnv("DEVSPACE_COMPACT_LOG_MAX_BYTES", DEFAULT_MAX_BYTES);
-  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
-
-  for (const day of [...dayEntries]) {
-    const dayTime = Date.parse(`${day}T00:00:00Z`);
-    if (Number.isFinite(dayTime) && dayTime < cutoff) {
-      await rm(path.join(root, day), { recursive: true, force: true });
-      dayEntries = dayEntries.filter((item) => item !== day);
-    }
-  }
-
-  let total = await directoryBytes(root);
-  for (const day of dayEntries.slice(0, -1)) {
-    if (total <= maxBytes) break;
-    const dayPath = path.join(root, day);
-    const bytes = await directoryBytes(dayPath);
-    await rm(dayPath, { recursive: true, force: true });
-    total -= bytes;
-  }
-}
-
 export async function persistShellRun({
   input,
   context,
@@ -225,7 +163,7 @@ export async function persistShellRun({
   lines.push(`log=${runId}; more=devspace-log read ${runId} 1 80; search=devspace-log grep ${runId} <pattern>`);
 
   try {
-    await maybePruneRunStore(root, now.getTime());
+    await pruneRunStore({ root, now: now.getTime(), protectRunId: runId });
   } catch {
     // Retention is best-effort. Never emit raw output because pruning failed.
   }
