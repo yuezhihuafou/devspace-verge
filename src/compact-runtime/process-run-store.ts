@@ -25,6 +25,7 @@ export interface ProcessRunMetadata {
   outputLines: number;
   sha256: string;
   outputPath: string;
+  logError: string | null;
   recoveredUpstreamFullOutput: false;
   upstreamFullOutputPath: null;
 }
@@ -35,6 +36,7 @@ export interface ProcessRunLoggerSnapshot {
   outputBytes: number;
   outputLines: number;
   outputPath: string;
+  logError?: string;
 }
 
 function positiveIntegerEnv(name: string, fallback: number): number {
@@ -88,6 +90,10 @@ async function maybePrune(root: string, now: number): Promise<void> {
   }
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export class ProcessRunLogger {
   readonly runId: string;
   readonly command: string;
@@ -103,6 +109,7 @@ export class ProcessRunLogger {
   private newlines = 0;
   private lastByte: number | null = null;
   private closed = false;
+  private writeError?: string;
 
   private constructor(input: {
     runId: string;
@@ -157,9 +164,20 @@ export class ProcessRunLogger {
   }
 
   append(output: string): void {
-    if (!output || this.closed) return;
+    if (!output || this.closed || this.writeError) return;
     const buffer = Buffer.from(output, "utf8");
-    writeSync(this.fd, buffer, 0, buffer.length);
+    try {
+      writeSync(this.fd, buffer, 0, buffer.length);
+    } catch (error) {
+      this.writeError = errorMessage(error);
+      try {
+        closeSync(this.fd);
+      } catch {
+        // Best effort; the process itself must continue even if logging failed.
+      }
+      this.closed = true;
+      return;
+    }
     this.hash.update(buffer);
     this.bytes += buffer.length;
     if (buffer.length > 0) this.lastByte = buffer[buffer.length - 1] ?? null;
@@ -175,12 +193,17 @@ export class ProcessRunLogger {
       outputBytes: this.bytes,
       outputLines: this.bytes === 0 ? 0 : this.newlines + (this.lastByte === 0x0a ? 0 : 1),
       outputPath: this.outputPath,
+      logError: this.writeError,
     };
   }
 
   async finish(input: { exitCode?: number; signal?: string }): Promise<ProcessRunMetadata> {
     if (!this.closed) {
-      closeSync(this.fd);
+      try {
+        closeSync(this.fd);
+      } catch (error) {
+        this.writeError ??= errorMessage(error);
+      }
       this.closed = true;
     }
     const finishedAtMs = Date.now();
@@ -201,15 +224,20 @@ export class ProcessRunLogger {
       outputLines: snap.outputLines,
       sha256: this.hash.digest("hex"),
       outputPath: this.outputPath,
+      logError: this.writeError ?? null,
       recoveredUpstreamFullOutput: false,
       upstreamFullOutputPath: null,
     };
-    await writeFile(this.metaPath, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
+    try {
+      await writeFile(this.metaPath, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
+    } catch (error) {
+      this.writeError ??= errorMessage(error);
+    }
     try {
       await maybePrune(this.root, finishedAtMs);
     } catch {
       // Retention is best-effort and must not alter process completion semantics.
     }
-    return meta;
+    return { ...meta, logError: this.writeError ?? null };
   }
 }
