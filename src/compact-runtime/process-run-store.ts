@@ -1,8 +1,13 @@
 import { closeSync, openSync, writeSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { maybePruneRunStore, runStoreRoot } from "./run-store.js";
+import { runStoreRoot } from "./run-store.js";
+
+const DEFAULT_RETENTION_DAYS = 30;
+const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+let lastPruneAt = 0;
 
 export interface ProcessRunMetadata {
   schemaVersion: 1;
@@ -30,6 +35,57 @@ export interface ProcessRunLoggerSnapshot {
   outputBytes: number;
   outputLines: number;
   outputPath: string;
+}
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function directoryBytes(dir: string): Promise<number> {
+  let total = 0;
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const child = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(child);
+    else if (entry.isFile()) total += (await stat(child)).size;
+  }
+  return total;
+}
+
+async function maybePrune(root: string, now: number): Promise<void> {
+  if (now - lastPruneAt < PRUNE_INTERVAL_MS) return;
+  lastPruneAt = now;
+  let dayEntries: string[];
+  try {
+    dayEntries = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return;
+  }
+
+  const retentionDays = positiveIntegerEnv("DEVSPACE_COMPACT_LOG_RETENTION_DAYS", DEFAULT_RETENTION_DAYS);
+  const maxBytes = positiveIntegerEnv("DEVSPACE_COMPACT_LOG_MAX_BYTES", DEFAULT_MAX_BYTES);
+  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+
+  for (const day of [...dayEntries]) {
+    const dayTime = Date.parse(`${day}T00:00:00Z`);
+    if (Number.isFinite(dayTime) && dayTime < cutoff) {
+      await rm(path.join(root, day), { recursive: true, force: true });
+      dayEntries = dayEntries.filter((item) => item !== day);
+    }
+  }
+
+  let total = await directoryBytes(root);
+  for (const day of dayEntries.slice(0, -1)) {
+    if (total <= maxBytes) break;
+    const dayPath = path.join(root, day);
+    const bytes = await directoryBytes(dayPath);
+    await rm(dayPath, { recursive: true, force: true });
+    total -= bytes;
+  }
 }
 
 export class ProcessRunLogger {
@@ -150,7 +206,7 @@ export class ProcessRunLogger {
     };
     await writeFile(this.metaPath, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
     try {
-      await maybePruneRunStore(this.root, finishedAtMs);
+      await maybePrune(this.root, finishedAtMs);
     } catch {
       // Retention is best-effort and must not alter process completion semantics.
     }
