@@ -46,7 +46,6 @@ function processResult(snapshot: ProcessSnapshot): string {
   ];
   const preview = compactPreview(snapshot.output, isError, snapshot.command);
   if (preview) lines.push(preview);
-  if (snapshot.logError) lines.push(`log_error=${snapshot.logError}`);
   lines.push(`log=${snapshot.runId}; more=devspace-log read ${snapshot.runId} 1 80 | grep ${snapshot.runId} <pattern>`);
   return lines.join("\n");
 }
@@ -62,7 +61,6 @@ function processOutputSchema(): z.ZodRawShape {
     outputBytes: z.number().nonnegative(),
     outputLines: z.number().nonnegative(),
     outputTruncated: z.boolean(),
-    logError: z.string().optional(),
   });
 }
 
@@ -82,7 +80,6 @@ function processToolResponse(snapshot: ProcessSnapshot) {
       outputBytes: snapshot.outputBytes,
       outputLines: snapshot.outputLines,
       outputTruncated: snapshot.outputTruncated,
-      logError: snapshot.logError,
     },
   };
 }
