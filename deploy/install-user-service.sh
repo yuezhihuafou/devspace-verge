@@ -5,6 +5,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 home_dir=${HOME:?HOME must be set}
 node_bin=${NODE_BIN:-$(command -v node || true)}
 
+# Non-login invocations may not export the user systemd bus variables.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
 if [[ -z "$node_bin" || ! -x "$node_bin" ]]; then
   echo "node >=22.19 is required; set NODE_BIN=/path/to/node" >&2
   exit 1
