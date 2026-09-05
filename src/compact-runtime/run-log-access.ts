@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { open, readdir, readFile } from "node:fs/promises";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 import readline from "node:readline";
 import path from "node:path";
 import { runStoreRoot } from "./run-store.js";
@@ -22,7 +22,7 @@ async function findRunDir(runId: string): Promise<string> {
     const candidate = path.join(root, day, runId);
     try {
       const entries = await readdir(candidate);
-      if (entries.includes("meta.json")) return candidate;
+      if (entries.includes("output.log") || entries.includes("meta.json")) return candidate;
     } catch {
       // Try the next day.
     }
@@ -133,12 +133,22 @@ export async function handleRunLogCommand(command: string): Promise<string | nul
     throw new Error("usage: devspace-log read|tail|grep|bytes|meta <runId> ...");
   }
   const runDir = await findRunDir(runId);
+  const outputPath = path.join(runDir, "output.log");
 
   if (action === "meta") {
-    return (await readFile(path.join(runDir, "meta.json"), "utf8")).trimEnd();
+    try {
+      return (await readFile(path.join(runDir, "meta.json"), "utf8")).trimEnd();
+    } catch {
+      const info = await stat(outputPath);
+      return JSON.stringify({
+        schemaVersion: 1,
+        runId,
+        running: true,
+        outputBytes: info.size,
+      }, null, 2);
+    }
   }
 
-  const outputPath = path.join(runDir, "output.log");
   if (action === "tail") return streamTail(outputPath, boundedCount(parts[3], 80));
   if (action === "read") {
     const start = boundedCount(parts[3], 1, Number.MAX_SAFE_INTEGER);
