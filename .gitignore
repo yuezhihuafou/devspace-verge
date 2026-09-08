@@ -3,4 +3,20 @@ dist/
 releases/
 .devspace-dev/
 .env
+.env.*
+!.env.example
 *.log
+
+# Local credentials and runtime state
+.devspace/
+.secrets/
+*.token
+*.secret
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
