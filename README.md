@@ -182,6 +182,17 @@ Run this to inspect your local setup:
 devspace doctor
 ```
 
+## Personal fork: persistent deployment
+
+This repository includes a compact shell-output runtime and a user-level
+systemd installer. The runtime preserves full shell logs locally while keeping
+model-facing results bounded. See [the deployment guide](docs/compact-runtime.md)
+and run:
+
+```bash
+bash deploy/install-user-service.sh
+```
+
 ## Documentation
 
 - [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)

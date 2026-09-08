@@ -49,6 +49,23 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }
 });
 
+test("codex process failures expose MCP error state and exit code", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const response = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspaceId: opened.workspaceId,
+      cmd: "sh -c 'printf expected-error >&2; exit 7'",
+      yieldTimeMs: 2_000,
+    },
+  });
+
+  assert.equal(response.isError, true);
+  assert.equal(structuredContent(response).exitCode, 7);
+  assert.match(contentText(response), /expected-error/);
+});
+
 test("UI metadata is limited to workspace and aggregate review", async (t) => {
   for (const uiEnabled of [true, false]) {
     await t.test(uiEnabled ? "enabled" : "disabled", async (nested) => {
@@ -617,7 +634,7 @@ async function fixture(
     config,
     workspaces,
     createReviewCheckpointManager(),
-    new ProcessSessionManager(),
+    new ProcessSessionManager({ runRoot: join(root, ".runs") }),
     resolveLocalAgentProviders,
     [],
   );
@@ -789,6 +806,18 @@ async function callOpen(
 function structuredContent(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {
   assert.ok(result.structuredContent);
   return result.structuredContent as Record<string, unknown>;
+}
+
+function contentText(result: Awaited<ReturnType<Client["callTool"]>>): string {
+  const blocks = Array.isArray(result.content) ? result.content : [];
+  return blocks
+    .filter((item): item is { type: "text"; text: string } =>
+      typeof item === "object"
+      && item !== null
+      && (item as { type?: unknown }).type === "text"
+      && typeof (item as { text?: unknown }).text === "string")
+    .map((item) => item.text)
+    .join("\n");
 }
 
 function responseCard(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {

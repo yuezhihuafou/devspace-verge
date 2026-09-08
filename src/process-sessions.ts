@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { ProcessRunLogger } from "./compact-runtime/process-run-store.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
@@ -36,11 +37,16 @@ export interface WriteStdinInput {
 
 export interface ProcessSnapshot {
   sessionId?: number;
+  runId: string;
+  command: string;
   output: string;
+  outputBytes: number;
+  outputLines: number;
   outputTruncated: boolean;
   running: boolean;
   exitCode?: number;
   signal?: string;
+  logError?: string;
   wallTimeMs: number;
 }
 
@@ -53,11 +59,13 @@ interface ManagedProcess {
 interface ProcessSession {
   id: number;
   workspaceId: string;
+  command: string;
   process?: ManagedProcess;
   startedAt: number;
   columns: number;
   rows: number;
   buffer: HeadTailBuffer;
+  runLogger: ProcessRunLogger;
   running: boolean;
   exitCode?: number;
   signal?: string;
@@ -69,6 +77,7 @@ interface ProcessSession {
 interface ProcessSessionManagerOptions {
   maxBufferCharacters?: number;
   completedSessionTtlMs?: number;
+  runRoot?: string;
 }
 
 function boundedInteger(value: number | undefined, fallback: number, maximum: number): number {
@@ -152,15 +161,12 @@ export class HeadTailBuffer {
 
   append(output: string): void {
     if (!output) return;
-
     const previousTotal = this.totalCharacters;
     this.totalCharacters += codePointLength(output);
-
     if (this.totalCharacters <= this.maxCharacters) {
       this.head += output;
       return;
     }
-
     const budget = splitBudget(this.maxCharacters);
     if (previousTotal <= this.maxCharacters) {
       const fullOutput = this.head + output;
@@ -168,7 +174,6 @@ export class HeadTailBuffer {
       this.tail = takeTail(fullOutput, budget.tail);
       return;
     }
-
     this.tail = takeTail(this.tail + output, budget.tail);
   }
 
@@ -180,7 +185,6 @@ export class HeadTailBuffer {
     if (!Number.isInteger(maxCharacters) || maxCharacters < 1) {
       throw new Error("Output limit must be a positive integer.");
     }
-
     const omittedByBuffer = Math.max(
       0,
       this.totalCharacters - codePointLength(this.head) - codePointLength(this.tail),
@@ -188,11 +192,9 @@ export class HeadTailBuffer {
     const retained = formatHeadTail(this.head, this.tail, omittedByBuffer);
     const output = truncateOutput(retained, maxCharacters);
     const truncated = omittedByBuffer > 0 || output.truncated;
-
     this.head = "";
     this.tail = "";
     this.totalCharacters = 0;
-
     return { output: output.output, truncated };
   }
 }
@@ -200,7 +202,6 @@ export class HeadTailBuffer {
 function truncateOutput(output: string, maxCharacters: number): { output: string; truncated: boolean } {
   const outputCharacters = codePointLength(output);
   if (outputCharacters <= maxCharacters) return { output, truncated: false };
-
   const marker = "\n... output truncated ...\n";
   const markerCharacters = codePointLength(marker);
   const available = Math.max(0, maxCharacters - markerCharacters);
@@ -215,28 +216,30 @@ export class ProcessSessionManager {
   private readonly sessions = new Map<number, ProcessSession>();
   private readonly maxBufferCharacters: number;
   private readonly completedSessionTtlMs: number;
+  private readonly runRoot?: string;
   private nextSessionId = 1;
 
   constructor(options: ProcessSessionManagerOptions = {}) {
     this.maxBufferCharacters = options.maxBufferCharacters ?? DEFAULT_BUFFER_CHARACTERS;
     this.completedSessionTtlMs = options.completedSessionTtlMs ?? COMPLETED_SESSION_TTL_MS;
+    this.runRoot = options.runRoot;
   }
 
   async start(input: StartCommandInput): Promise<ProcessSnapshot> {
-    const session = this.createSession(input);
+    const session = await this.createSession(input);
     this.sessions.set(session.id, session);
-
     try {
       if (input.tty && process.platform !== "win32") await this.startPty(session, input);
       else this.startPipe(session, input);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.append(session, `${message}\n`);
+      await session.runLogger.finish({ exitCode: 1 });
       this.sessions.delete(session.id);
       throw error;
     }
-
     const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_COMMAND_YIELD_MS);
     await this.waitForExit(session, yieldTimeMs);
-
     const snapshot = this.consume(session, input.maxOutputTokens);
     if (!session.running) this.removeSession(session.id);
     return snapshot;
@@ -245,9 +248,7 @@ export class ProcessSessionManager {
   async write(input: WriteStdinInput): Promise<ProcessSnapshot> {
     const session = this.getOwnedSession(input.workspaceId, input.sessionId);
     const chars = input.chars ?? "";
-    const interactionRequested =
-      chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
-
+    const interactionRequested = chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
     if (input.columns !== undefined || input.rows !== undefined) {
       session.columns = terminalSize(input.columns, session.columns);
       session.rows = terminalSize(input.rows, session.rows);
@@ -256,21 +257,16 @@ export class ProcessSessionManager {
       }
       session.process.resize(session.columns, session.rows);
     }
-
     const interruptRequested = chars.includes("\u0003") && session.running;
-    if (interruptRequested) {
-      session.process?.kill("SIGINT");
-    }
+    if (interruptRequested) session.process?.kill("SIGINT");
     const writableChars = chars.replaceAll("\u0003", "");
     if (writableChars && session.running) session.process?.write(writableChars);
-
     if ((interactionRequested || !session.buffer.hasOutput()) && session.running) {
       const fallback = interactionRequested ? DEFAULT_INTERACTIVE_YIELD_MS : DEFAULT_POLL_YIELD_MS;
       const maximum = interactionRequested ? MAX_COMMAND_YIELD_MS : MAX_POLL_YIELD_MS;
       const yieldTimeMs = boundedInteger(input.yieldTimeMs, fallback, maximum);
       await this.waitForExit(session, yieldTimeMs);
     }
-
     const snapshot = this.consume(session, input.maxOutputTokens);
     if (!session.running) this.removeSession(session.id);
     return snapshot;
@@ -303,19 +299,28 @@ export class ProcessSessionManager {
     }
   }
 
-  private createSession(input: StartCommandInput): ProcessSession {
+  private async createSession(input: StartCommandInput): Promise<ProcessSession> {
     let resolveExit = (): void => undefined;
     const exitPromise = new Promise<void>((resolve) => {
       resolveExit = resolve;
     });
-
+    const startedAt = Date.now();
+    const runLogger = await ProcessRunLogger.create({
+      command: input.command,
+      cwd: input.cwd,
+      workspaceRoot: input.workspaceRoot ?? input.cwd,
+      startedAtMs: startedAt,
+      root: this.runRoot,
+    });
     return {
       id: this.nextSessionId++,
       workspaceId: input.workspaceId,
-      startedAt: Date.now(),
+      command: input.command,
+      startedAt,
       columns: terminalSize(input.columns, DEFAULT_COLUMNS),
       rows: terminalSize(input.rows, DEFAULT_ROWS),
       buffer: new HeadTailBuffer(this.maxBufferCharacters),
+      runLogger,
       running: true,
       exitPromise,
       resolveExit,
@@ -327,16 +332,12 @@ export class ProcessSessionManager {
     const detached = process.platform !== "win32";
     const child = spawn(input.command, {
       cwd: input.cwd,
-      env: processEnvironment({
-        workspaceId: input.workspaceId,
-        workspaceRoot: input.workspaceRoot,
-      }),
+      env: processEnvironment({ workspaceId: input.workspaceId, workspaceRoot: input.workspaceRoot }),
       stdio: "pipe",
       windowsHide: true,
       detached,
       shell: shell.executable,
     });
-
     session.process = {
       write: (data) => child.stdin.write(data),
       kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
@@ -355,24 +356,14 @@ export class ProcessSessionManager {
     } catch {
       throw new Error("PTY support requires the optional node-pty dependency.");
     }
-
     const shell = resolveShellCommand(input.command);
-    let pty: import("node-pty").IPty;
-    try {
-      pty = nodePty.spawn(shell.executable, shell.args, {
-        cwd: input.cwd,
-        env: processEnvironment({
-          workspaceId: input.workspaceId,
-          workspaceRoot: input.workspaceRoot,
-        }),
-        name: "xterm-256color",
-        cols: session.columns,
-        rows: session.rows,
-      });
-    } catch (error) {
-      throw error;
-    }
-
+    const pty = nodePty.spawn(shell.executable, shell.args, {
+      cwd: input.cwd,
+      env: processEnvironment({ workspaceId: input.workspaceId, workspaceRoot: input.workspaceRoot }),
+      name: "xterm-256color",
+      cols: session.columns,
+      rows: session.rows,
+    });
     session.process = {
       write: (data) => pty.write(data),
       kill: (signal) => pty.kill(signal),
@@ -389,15 +380,18 @@ export class ProcessSessionManager {
     session.running = false;
     session.exitCode = exitCode;
     session.signal = signal;
-    session.resolveExit();
-    session.cleanupTimer = setTimeout(
-      () => this.sessions.delete(session.id),
-      this.completedSessionTtlMs,
-    );
-    session.cleanupTimer.unref();
+    void session.runLogger.finish({ exitCode, signal }).finally(() => {
+      session.resolveExit();
+      session.cleanupTimer = setTimeout(
+        () => this.sessions.delete(session.id),
+        this.completedSessionTtlMs,
+      );
+      session.cleanupTimer.unref();
+    });
   }
 
   private append(session: ProcessSession, output: string): void {
+    session.runLogger.append(output);
     session.buffer.append(output);
   }
 
@@ -405,14 +399,19 @@ export class ProcessSessionManager {
     const limit = boundedInteger(maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
     const maxCharacters = Math.max(256, limit * 4);
     const buffered = session.buffer.drain(maxCharacters);
-
+    const run = session.runLogger.snapshot();
     return {
       sessionId: session.running ? session.id : undefined,
+      runId: run.runId,
+      command: session.command,
       output: buffered.output,
+      outputBytes: run.outputBytes,
+      outputLines: run.outputLines,
       outputTruncated: buffered.truncated,
       running: session.running,
       exitCode: session.exitCode,
       signal: session.signal,
+      logError: run.logError,
       wallTimeMs: Date.now() - session.startedAt,
     };
   }
