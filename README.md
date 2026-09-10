@@ -4,65 +4,49 @@
   </picture>
 </p>
 
-<h1 align="center">DevSpace</h1>
+<h1 align="center">DevSpace Verge</h1>
 
-<p align="center">Bring a Codex-style coding workflow to ChatGPT.</p>
+<p align="center">An Agent-optimized unofficial fork of DevSpace.</p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@waishnav/devspace"><img alt="npm" src="https://img.shields.io/npm/v/%40waishnav%2Fdevspace?style=flat-square" /></a>
-  <a href="https://github.com/Waishnav/devspace/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Waishnav/devspace/ci.yml?style=flat-square&branch=main" /></a>
-  <a href="https://github.com/Waishnav/devspace/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/npm/l/%40waishnav%2Fdevspace?style=flat-square" /></a>
+  <a href="https://www.npmjs.com/package/@waishnav/devspace"><img alt="upstream npm" src="https://img.shields.io/npm/v/%40waishnav%2Fdevspace?style=flat-square" /></a>
+  <a href="https://github.com/Waishnav/devspace/actions/workflows/ci.yml"><img alt="upstream CI" src="https://img.shields.io/github/actions/workflow/status/Waishnav/devspace/ci.yml?style=flat-square&branch=main" /></a>
+  <a href="https://github.com/Waishnav/devspace/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/npm/l/%40waishnav%2Fdevspace?style=flat-square" /></a>
 </p>
+
+> [!IMPORTANT]
+> **DevSpace Verge is an unofficial fork of [Waishnav/devspace](https://github.com/Waishnav/devspace).**
+> The upstream project and original DevSpace code are by Waishnav and contributors.
+> This fork keeps the upstream MIT license and focuses on model-facing output efficiency,
+> persistent command logs, and reliability for long-running Agent workflows.
+
+## What Verge changes
+
+Compared with upstream DevSpace, Verge adds an Agent-friendly compact runtime:
+
+- compact model-facing command results instead of sending large shell logs into the LLM context
+- full local command-log persistence with stable `runId` references
+- on-demand `devspace-log read`, `tail`, `grep`, `bytes`, and `meta` retrieval
+- adaptive previews for inspection, verification/build, normal, and failed commands
+- explicit process failure metadata such as exit code and MCP error state
+- bounded log retention so persistent logs do not grow without limit
+- user-level persistent deployment helpers for long-running DevSpace installations
+
+The goal is to keep the model context high-signal while preserving the complete raw output locally for debugging.
 
 [![DevSpace connected to ChatGPT](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)
 
-**Give ChatGPT a secure connection to your own machine and Turn ChatGPT into Codex**
+**Give ChatGPT a secure connection to your own machine and turn ChatGPT into Codex.**
 
 DevSpace is a self-hosted MCP server that lets ChatGPT read, edit, search, and run code in your real local projects — your files, your tools, your terminal — without uploading anything to a third party. You run it on your machine, expose it through a tunnel you control, and approve the connection with a password only you have.
 
 The same `/mcp` endpoint serves the 2026-07-28 per-request protocol and automatically supports older 2025-era clients through stateless compatibility handling. There is no protocol mode to configure.
 
-## Sponsors and Special Thanks
-<!-- 
-
-<table>
-  <thead>
-    <tr>
-      <th>Sponsor</th>
-      <th>About</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" width="220">
-        <a href="https://rebates.ai/">
-          <img
-            src="https://app.rebates.ai/brand/rebates-lockup.svg"
-            alt="Rebates"
-            width="170"
-          >
-        </a>
-      </td>
-      <td>
-        <strong>The ads in your terminal pay you.</strong><br><br>
-        <a href="https://rebates.ai/">Rebates</a> adds one optional
-        sponsored footer to your coding agent and pays you cash back for every
-        session in which it is shown. Turn it off at any time.
-      </td>
-    </tr>
-  </tbody>
-</table>
--->
-<p>
-  DevSpace is open to new sponsors.
-  <a href="https://x.com/wshxnv">Get in touch to become one.</a>
-</p>
-
 ## Installation
 
 DevSpace requires Node `>=22.19 <27`.
 
-Install the DevSpace CLI:
+The published npm package below is the **upstream DevSpace package**:
 
 ```bash
 npm install -g @waishnav/devspace
@@ -74,11 +58,13 @@ Then initialize DevSpace:
 devspace init
 ```
 
-Or run it without a global install:
+Or run the upstream package without a global install:
 
 ```bash
 npx @waishnav/devspace init
 ```
+
+To use the Verge-specific changes, clone this repository and build it from source; see [Verge additions](#verge-additions) and [Local Development](#local-development).
 
 During setup, DevSpace asks for:
 
@@ -182,10 +168,10 @@ Run this to inspect your local setup:
 devspace doctor
 ```
 
-## Personal fork: persistent deployment
+## Verge additions
 
-This repository includes a compact shell-output runtime and a user-level
-systemd installer. The runtime preserves full shell logs locally while keeping
+This fork includes a compact shell-output runtime and a user-level systemd
+installer. The runtime preserves full shell logs locally while keeping
 model-facing results bounded. See [the deployment guide](docs/compact-runtime.md)
 and run:
 
@@ -194,6 +180,8 @@ bash deploy/install-user-service.sh
 ```
 
 ## Documentation
+
+The following upstream documentation remains applicable to Verge unless a Verge-specific document says otherwise:
 
 - [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
 - [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
@@ -207,57 +195,24 @@ bash deploy/install-user-service.sh
 Every piece of software is becoming conversational. Natural language is
 redefining how we interact with tools, workflows, and systems.
 
-My bet is that ChatGPT becomes the operating system for everything. Once we
-reach AGI, we will simply talk to ChatGPT, and it will prompt, coordinate, and
-orchestrate sub-agents that set up the right loops for us.
-
-We are not there yet.
-
 DevSpace is one attempt to fast-forward that future: a way for MCP-capable
 hosts like ChatGPT and Claude to work directly with local project files through
 explicit, inspectable tools.
 
-## Built by Waishnav
+Verge keeps that foundation and focuses specifically on making long-running,
+tool-heavy Agent sessions more context-efficient and operationally robust.
 
-I'm Waishnav. I like building opinionated products and tools, and Artifacts is one example.
+## Upstream attribution
 
-This year, I began my journey to build a one-person, multi-agent company capable of generating millions in revenue. If you want to follow the failures, wins, lessons, and everything in between, come hang out with me on [X](https://x.com/wshxnv).
+DevSpace Verge is derived from **[Waishnav/devspace](https://github.com/Waishnav/devspace)**.
+The original DevSpace project is by **Waishnav and contributors**. Their copyright
+notice and the MIT license are preserved in this repository's `LICENSE` file.
 
-
-## More from me
-
-<table>
-  <thead>
-    <tr>
-      <th>Project</th>
-      <th>About</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" width="220">
-        <a href="https://gitcms.dev/">
-          <img
-            src="https://gitcms.dev/brand/gitcms-logo.svg"
-            alt="GitCMS"
-            width="48"
-          /><br />
-          <strong>GitCMS</strong>
-        </a>
-      </td>
-      <td>
-        <strong>Modern CMS and tooling for markdown based content sites — built for agents and humans.</strong><br><br>
-        Visual editing, editorial workflow, and ChatGPT/Claude content agents, with
-        every post and page stored as files in your repo.
-        <a href="https://gitcms.dev/">Learn more</a>.
-      </td>
-    </tr>
-  </tbody>
-</table>
+DevSpace Verge is independent and is **not an official DevSpace release**.
 
 ## Local Development
 
-For working on DevSpace itself:
+For working on DevSpace Verge itself:
 
 Install pnpm 11.25.0, the version pinned in `package.json`, with
 `npm install --global pnpm@11.25.0`, then:
