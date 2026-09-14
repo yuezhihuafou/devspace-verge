@@ -1,38 +1,24 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { runStoreRoot } from "./compact-runtime/run-store.js";
 import type { DurableTaskRequest } from "./durable-task-runner.js";
+import {
+  durableTaskView,
+  taskPollIntervalMs,
+  type DurableTaskState,
+  type DurableTaskView,
+} from "./durable-task-model.js";
 import type { ProcessSnapshot, StartCommandInput } from "./process-sessions.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PREVIEW_CHARACTERS = 40_000;
 const TASK_HEARTBEAT_STALE_MS = 60_000;
-
-interface DurableTaskState {
-  schemaVersion: 1;
-  taskId: string;
-  runId: string;
-  command: string;
-  cwd: string;
-  root: string;
-  outputPath: string;
-  status: "starting" | "running" | "completed" | "failed" | "cancelled";
-  startedAt: string;
-  updatedAt: string;
-  lastActivityAt: string;
-  finishedAt?: string;
-  runnerPid?: number;
-  childPid?: number;
-  outputBytes: number;
-  outputLines: number;
-  exitCode?: number | null;
-  signal?: string | null;
-}
+const DAY_MS = 24 * 60 * 60 * 1_000;
 
 export interface DurableTaskLauncherInput {
   requestPath: string;
@@ -44,6 +30,14 @@ export interface DurableTaskManagerOptions {
   runRoot?: string;
   runnerPath?: string;
   launchTask?: (input: DurableTaskLauncherInput) => Promise<void>;
+}
+
+export interface DurableTaskNotification {
+  taskId: string;
+  runId: string;
+  status: "completed" | "cancelled" | "failed";
+  statusMessage?: string;
+  lastUpdatedAt: string;
 }
 
 function taskEnvironment(input: StartCommandInput): Record<string, string> {
@@ -72,6 +66,20 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
 
 function runIdFor(now: Date): string {
   return `run_${now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}_${randomUUID().slice(0, 8)}`;
+}
+
+function taskIdFor(): string {
+  return `task_${randomUUID()}`;
+}
+
+function taskTtlMs(): number {
+  const parsed = Number.parseInt(process.env.DEVSPACE_COMPACT_LOG_RETENTION_DAYS ?? "", 10);
+  const days = Number.isFinite(parsed) && parsed > 0 ? parsed : 30;
+  return days * DAY_MS;
+}
+
+function workspaceKey(workspaceRoot: string): string {
+  return createHash("sha256").update(path.resolve(workspaceRoot)).digest("hex").slice(0, 32);
 }
 
 function systemdUserAvailable(): boolean {
@@ -116,8 +124,8 @@ async function readState(taskPath: string): Promise<DurableTaskState> {
 }
 
 function runningState(state: DurableTaskState): boolean {
-  if (state.status !== "starting" && state.status !== "running") return false;
-  const updatedAt = Date.parse(state.updatedAt);
+  if (state.status !== "working") return false;
+  const updatedAt = Date.parse(state.lastUpdatedAt);
   return !Number.isFinite(updatedAt) || Date.now() - updatedAt <= TASK_HEARTBEAT_STALE_MS;
 }
 
@@ -144,42 +152,62 @@ export class DurableTaskManager {
     const taskPath = path.join(runDir, "task.json");
     const metaPath = path.join(runDir, "meta.json");
     const requestPath = path.join(runDir, "request.json");
-    const taskId = runId;
+    const taskId = taskIdFor();
     const unitName = `devspace-task-${runId}`;
+    const indexPath = this.taskIndexPath(taskId);
+    const workspaceRoot = input.workspaceRoot ?? input.cwd;
+    const notificationPath = this.notificationPath(workspaceRoot, taskId);
     await mkdir(runDir, { recursive: true, mode: 0o700 });
+    await mkdir(path.dirname(indexPath), { recursive: true, mode: 0o700 });
+    await mkdir(path.dirname(notificationPath), { recursive: true, mode: 0o700 });
     await writeFile(outputPath, "", { mode: 0o600 });
     const startedAt = now.toISOString();
     await writeJsonAtomic(taskPath, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       taskId,
+      status: "working",
+      statusMessage: "Task created; command launch pending.",
+      createdAt: startedAt,
+      lastUpdatedAt: startedAt,
+      ttlMs: taskTtlMs(),
+      workspaceId: input.workspaceId,
       runId,
       command: input.command,
       cwd: input.cwd,
-      root: input.workspaceRoot ?? input.cwd,
+      root: workspaceRoot,
       outputPath,
-      status: "starting",
-      startedAt,
-      updatedAt: startedAt,
       lastActivityAt: startedAt,
+      unitName,
       outputBytes: 0,
       outputLines: 0,
     } satisfies DurableTaskState);
 
     const request: DurableTaskRequest = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       taskId,
       runId,
+      workspaceId: input.workspaceId,
+      unitName,
       command: input.command,
       cwd: input.cwd,
-      root: input.workspaceRoot ?? input.cwd,
+      root: workspaceRoot,
       runRoot: this.runRoot,
       outputPath,
       taskPath,
       metaPath,
+      notificationPath,
       startedAt,
+      ttlMs: taskTtlMs(),
       env: taskEnvironment(input),
     };
     await writeJsonAtomic(requestPath, request);
+    await writeJsonAtomic(indexPath, {
+      schemaVersion: 1,
+      taskId,
+      workspaceId: input.workspaceId,
+      runId,
+      taskPath,
+    });
 
     await this.launch({ requestPath, unitName, runnerPath: this.runnerPath });
     const deadline = Date.now() + Math.max(0, waitMs);
@@ -189,6 +217,82 @@ export class DurableTaskManager {
       state = await readState(taskPath);
     }
     return this.snapshot(state);
+  }
+
+  async get(
+    workspaceRoot: string,
+    taskId: string,
+    options: { acknowledge?: boolean } = {},
+  ): Promise<DurableTaskView> {
+    const state = await this.findTask(taskId);
+    this.assertOwned(state, workspaceRoot);
+    const view = durableTaskView(state);
+    if (options.acknowledge !== false
+      && (view.status === "completed" || view.status === "cancelled" || view.status === "failed")) {
+      await unlink(this.notificationPath(workspaceRoot, taskId)).catch(() => undefined);
+    }
+    return view;
+  }
+
+  async pendingNotifications(workspaceRoot: string): Promise<DurableTaskNotification[]> {
+    const directory = path.join(this.runRoot, ".task-notifications", workspaceKey(workspaceRoot));
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    const notifications: DurableTaskNotification[] = [];
+    for (const entry of entries.filter((candidate) => candidate.isFile()).slice(0, 20)) {
+      try {
+        const parsed = JSON.parse(await readFile(path.join(directory, entry.name), "utf8")) as DurableTaskNotification & { root?: string };
+        if (parsed.root && path.resolve(parsed.root) !== path.resolve(workspaceRoot)) continue;
+        if (parsed.status !== "completed" && parsed.status !== "cancelled" && parsed.status !== "failed") continue;
+        notifications.push(parsed);
+      } catch {
+        // Ignore a partially-written or stale notification file.
+      }
+    }
+    return notifications.sort((left, right) => left.lastUpdatedAt.localeCompare(right.lastUpdatedAt));
+  }
+
+  async cancel(workspaceRoot: string, taskId: string): Promise<void> {
+    const state = await this.findTask(taskId);
+    this.assertOwned(state, workspaceRoot);
+    if (state.status !== "working" && state.status !== "input_required") return;
+    if (state.unitName && systemdUserAvailable()) {
+      await execFileAsync("systemctl", ["--user", "stop", state.unitName], {
+        timeout: 5_000,
+        windowsHide: true,
+      }).catch(() => undefined);
+      return;
+    }
+    if (state.runnerPid) {
+      try {
+        process.kill(state.runnerPid, "SIGTERM");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  }
+
+  async update(
+    workspaceRoot: string,
+    taskId: string,
+    inputResponses: Record<string, unknown>,
+  ): Promise<void> {
+    const state = await this.findTask(taskId);
+    this.assertOwned(state, workspaceRoot);
+    if (state.status !== "input_required") {
+      throw new Error(`Task ${taskId} is not waiting for input.`);
+    }
+    const outstanding = state.inputRequests ?? {};
+    for (const key of Object.keys(inputResponses)) {
+      if (!(key in outstanding)) continue;
+      delete outstanding[key];
+    }
+    await this.writeTaskState(state, {
+      inputRequests: outstanding,
+      status: Object.keys(outstanding).length === 0 ? "working" : "input_required",
+      statusMessage: Object.keys(outstanding).length === 0
+        ? "Input received; task may resume."
+        : "Waiting for remaining client input.",
+    });
   }
 
   private async launch(input: DurableTaskLauncherInput): Promise<void> {
@@ -225,14 +329,93 @@ export class DurableTaskManager {
     child.unref();
   }
 
+  private async findTask(taskId: string): Promise<DurableTaskState> {
+    if (!/^task_[0-9a-f-]{36}$/i.test(taskId)) throw new Error("Invalid taskId.");
+    try {
+      const pointer = JSON.parse(await readFile(this.taskIndexPath(taskId), "utf8")) as { taskPath?: string };
+      if (pointer.taskPath) return readState(this.validateTaskPath(pointer.taskPath));
+    } catch {
+      // Fall back to scanning runs created before the task index existed.
+    }
+    const days = await readdir(this.runRoot, { withFileTypes: true }).catch(() => []);
+    for (const day of days.filter((entry) => entry.isDirectory()).sort((a, b) => b.name.localeCompare(a.name))) {
+      const dayPath = path.join(this.runRoot, day.name);
+      const runs = await readdir(dayPath, { withFileTypes: true }).catch(() => []);
+      for (const run of runs) {
+        if (!run.isDirectory()) continue;
+        const taskPath = path.join(dayPath, run.name, "task.json");
+        try {
+          const state = await readState(taskPath);
+          if (state.taskId === taskId) return state;
+        } catch {
+          // Ignore non-task or partially-created run directories.
+        }
+      }
+    }
+    throw new Error(`Unknown task: ${taskId}`);
+  }
+
+  private assertOwned(state: DurableTaskState, workspaceRoot: string): void {
+    if (path.resolve(state.root) !== path.resolve(workspaceRoot)) {
+      throw new Error(`Task ${state.taskId} does not belong to workspace root ${workspaceRoot}.`);
+    }
+  }
+
+  private async writeTaskState(
+    state: DurableTaskState,
+    update: Partial<DurableTaskState>,
+  ): Promise<void> {
+    const next = {
+      ...state,
+      ...update,
+      lastUpdatedAt: new Date().toISOString(),
+    } satisfies DurableTaskState;
+    const taskPath = await this.findTaskPath(state.taskId);
+    await writeJsonAtomic(taskPath, next);
+  }
+
+  private async findTaskPath(taskId: string): Promise<string> {
+    try {
+      const pointer = JSON.parse(await readFile(this.taskIndexPath(taskId), "utf8")) as { taskPath?: string };
+      if (pointer.taskPath) return this.validateTaskPath(pointer.taskPath);
+    } catch {
+      // Fall through to the compatibility scan.
+    }
+    const state = await this.findTask(taskId);
+    return path.join(this.runRoot, state.createdAt.slice(0, 10), state.runId, "task.json");
+  }
+
+  private taskIndexPath(taskId: string): string {
+    return path.join(this.runRoot, ".task-index", `${taskId}.json`);
+  }
+
+  private notificationPath(workspaceRoot: string, taskId: string): string {
+    return path.join(
+      this.runRoot,
+      ".task-notifications",
+      workspaceKey(workspaceRoot),
+      `${taskId}.json`,
+    );
+  }
+
+  private validateTaskPath(candidate: string): string {
+    const resolvedRoot = path.resolve(this.runRoot);
+    const resolved = path.resolve(candidate);
+    if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
+      throw new Error("Task index points outside the run store.");
+    }
+    return resolved;
+  }
+
   private async snapshot(state: DurableTaskState): Promise<ProcessSnapshot> {
     const preview = await readPreview(state.outputPath);
-    const startedAt = Date.parse(state.startedAt);
+    const startedAt = Date.parse(state.createdAt);
     const lastActivityAt = Date.parse(state.lastActivityAt);
     const now = Date.now();
     const running = runningState(state);
     return {
       runId: state.runId,
+      taskId: state.taskId,
       command: state.command,
       output: preview.output,
       outputBytes: state.outputBytes,

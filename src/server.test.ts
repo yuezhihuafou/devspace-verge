@@ -14,6 +14,8 @@ import { buildLocalAgentProviderStatuses } from "./local-agent-catalog.js";
 import type { SubagentsConfig } from "./local-agent-config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
+import { DurableTaskManager } from "./durable-tasks.js";
+import { runDurableTask } from "./durable-task-runner.js";
 import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
@@ -32,7 +34,7 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "apply_patch", "exec_command", "process_status", "write_stdin", "show_changes"],
+      expected: ["open_workspace", "read", "apply_patch", "exec_command", "task_get", "task_update", "task_cancel", "process_status", "write_stdin", "show_changes"],
     },
   ];
 
@@ -70,7 +72,7 @@ test("codex process tools keep wait and output budgets server-managed", async (t
   const context = await fixture(t, { toolMode: "codex" });
   const tools = await context.client.listTools();
 
-  for (const name of ["exec_command", "process_status", "write_stdin"]) {
+  for (const name of ["exec_command", "task_get", "task_update", "task_cancel", "process_status", "write_stdin"]) {
     const tool = tools.tools.find((candidate) => candidate.name === name);
     assert.ok(tool, `${name} should be registered`);
     const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
@@ -108,6 +110,44 @@ test("codex devspace-log responses satisfy the process output schema", async (t)
     if (previousRunRoot === undefined) delete process.env.DEVSPACE_COMPACT_RUN_ROOT;
     else process.env.DEVSPACE_COMPACT_RUN_ROOT = previousRunRoot;
   }
+});
+
+test("codex durable task compatibility tools expose an MCP-like lifecycle", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true });
+  const opened = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-a"));
+  const workspaceId = opened.workspaceId;
+  assert.equal(typeof workspaceId, "string");
+
+  const command = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspaceId,
+      cmd: `${JSON.stringify(process.execPath)} -e "console.log('task-tool-ok')"`,
+    },
+  });
+  const commandState = structuredContent(command);
+  assert.equal(typeof commandState.taskId, "string");
+  assert.equal(typeof commandState.runId, "string");
+  assert.equal(commandState.resultType, "complete");
+
+  const reopened = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-b"));
+  const resumedWorkspaceId = reopened.workspaceId;
+  assert.equal(typeof resumedWorkspaceId, "string");
+  assert.notEqual(resumedWorkspaceId, workspaceId);
+  const pending = reopened.pendingTasks as Array<{ taskId?: string }> | undefined;
+  assert.ok(pending?.some((task) => task.taskId === commandState.taskId));
+
+  const task = await context.client.callTool({
+    name: "task_get",
+    arguments: { workspaceId: resumedWorkspaceId, taskId: commandState.taskId },
+  });
+  const taskState = structuredContent(task);
+  assert.equal(taskState.resultType, "complete");
+  assert.equal(taskState.status, "completed");
+  assert.equal((taskState.taskResult as { isError?: boolean } | undefined)?.isError, false);
+
+  const acknowledged = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-c"));
+  assert.equal(acknowledged.pendingTasks, undefined);
 });
 
 test("UI metadata is limited to workspace and aggregate review", async (t) => {
@@ -547,6 +587,7 @@ test("server shutdown waits for an active MCP tool call", async (t) => {
 interface ServerFixture {
   client: Client;
   project: string;
+  durableTasks?: DurableTaskManager;
 }
 
 interface HttpServerFixture {
@@ -604,6 +645,7 @@ async function fixture(
     subagents?: SubagentsConfig;
     toolMode?: ToolMode;
     uiEnabled?: boolean;
+    durableTasks?: boolean;
   } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
@@ -674,6 +716,15 @@ async function fixture(
   );
   const store = new SqliteWorkspaceStore(stateDir);
   const workspaces = new WorkspaceRegistry(config, store);
+  const durableTasks = options.durableTasks
+    ? new DurableTaskManager({
+        runRoot: join(root, ".runs"),
+        runnerPath: "test-runner",
+        launchTask: async ({ requestPath }) => {
+          void runDurableTask(requestPath);
+        },
+      })
+    : undefined;
   const server = createMcpServer(
     config,
     workspaces,
@@ -681,6 +732,8 @@ async function fixture(
     new ProcessSessionManager({ runRoot: join(root, ".runs") }),
     resolveLocalAgentProviders,
     [],
+    undefined,
+    durableTasks,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "devspace-test-client", version: "1.0.0" });
@@ -703,7 +756,7 @@ async function fixture(
     await rm(root, { recursive: true, force: true });
   });
 
-  return { client, project };
+  return { client, project, durableTasks };
 }
 
 async function git(cwd: string, args: string[]): Promise<void> {

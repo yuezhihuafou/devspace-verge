@@ -4,11 +4,14 @@ import { readFile, realpath, rename, unlink, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url";
 import { resolveShellCommand } from "./process-platform.js";
 import { pruneRunStore } from "./compact-runtime/retention.js";
+import type { DurableTaskState, DurableTaskStatus } from "./durable-task-model.js";
 
 export interface DurableTaskRequest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   taskId: string;
   runId: string;
+  workspaceId: string;
+  unitName?: string;
   command: string;
   cwd: string;
   root: string;
@@ -16,35 +19,32 @@ export interface DurableTaskRequest {
   outputPath: string;
   taskPath: string;
   metaPath: string;
+  notificationPath: string;
   startedAt: string;
+  ttlMs: number | null;
   env: Record<string, string>;
-}
-
-interface DurableTaskState {
-  schemaVersion: 1;
-  taskId: string;
-  runId: string;
-  command: string;
-  cwd: string;
-  root: string;
-  outputPath: string;
-  status: "starting" | "running" | "completed" | "failed" | "cancelled";
-  startedAt: string;
-  updatedAt: string;
-  lastActivityAt: string;
-  finishedAt?: string;
-  runnerPid?: number;
-  childPid?: number;
-  outputBytes: number;
-  outputLines: number;
-  exitCode?: number | null;
-  signal?: string | null;
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.tmp-${process.pid}`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, path);
+}
+
+async function writeCompletionNotification(
+  request: DurableTaskRequest,
+  status: "completed" | "cancelled" | "failed",
+  statusMessage: string,
+): Promise<void> {
+  await writeJsonAtomic(request.notificationPath, {
+    schemaVersion: 1,
+    taskId: request.taskId,
+    root: request.root,
+    runId: request.runId,
+    status,
+    statusMessage,
+    lastUpdatedAt: new Date().toISOString(),
+  });
 }
 
 function countNewlines(buffer: Buffer): number {
@@ -73,24 +73,28 @@ export async function runDurableTask(requestPath: string): Promise<number> {
   const output = createWriteStream(request.outputPath, { flags: "a", mode: 0o600 });
 
   const state = async (
-    status: DurableTaskState["status"],
+    status: DurableTaskStatus,
     extra: Partial<DurableTaskState> = {},
   ): Promise<void> => {
     const now = Date.now();
     const value = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       taskId: request.taskId,
+      status,
+      statusMessage: status === "working" ? "Command is running." : undefined,
+      createdAt: request.startedAt,
+      lastUpdatedAt: new Date(now).toISOString(),
+      ttlMs: request.ttlMs,
+      workspaceId: request.workspaceId,
       runId: request.runId,
       command: request.command,
       cwd: request.cwd,
       root: request.root,
       outputPath: request.outputPath,
-      status,
-      startedAt: request.startedAt,
-      updatedAt: new Date(now).toISOString(),
       lastActivityAt: new Date(lastActivityAtMs).toISOString(),
       runnerPid: process.pid,
       childPid,
+      unitName: request.unitName,
       outputBytes: bytes,
       outputLines: bytes === 0 ? 0 : newlines + (lastByte === 0x0a ? 0 : 1),
       ...extra,
@@ -123,7 +127,7 @@ export async function runDurableTask(requestPath: string): Promise<number> {
   };
 
   try {
-    await state("starting");
+    await state("working", { statusMessage: "Starting command." });
     const shell = resolveShellCommand(request.command, process.platform, request.env);
     const { spawn } = await import("node:child_process");
     const child = spawn(shell.executable, shell.args, {
@@ -151,10 +155,10 @@ export async function runDurableTask(requestPath: string): Promise<number> {
     const onInt = () => forwardSignal("SIGINT");
     process.once("SIGTERM", onTerm);
     process.once("SIGINT", onInt);
-    await state("running");
+    await state("working");
 
     const heartbeat = setInterval(() => {
-      void state("running").catch(() => undefined);
+      void state("working").catch(() => undefined);
     }, 2_000);
     heartbeat.unref();
 
@@ -168,11 +172,9 @@ export async function runDurableTask(requestPath: string): Promise<number> {
     const finishedAtMs = Date.now();
     const signal = result.signal ?? requestedSignal ?? null;
     const exitCode = result.exitCode;
-    const finalStatus: DurableTaskState["status"] = signal
+    const finalStatus: DurableTaskStatus = signal
       ? "cancelled"
-      : exitCode === 0
-        ? "completed"
-        : "failed";
+      : "completed";
     const outputLines = bytes === 0 ? 0 : newlines + (lastByte === 0x0a ? 0 : 1);
     const meta = {
       schemaVersion: 1,
@@ -195,13 +197,30 @@ export async function runDurableTask(requestPath: string): Promise<number> {
       upstreamFullOutputPath: null,
     };
     await writeJsonAtomic(request.metaPath, meta);
+    const terminalMessage = signal
+      ? `Command cancelled by ${signal}.`
+      : exitCode === 0
+        ? "Command completed successfully."
+        : `Command completed with exit code ${exitCode ?? "unknown"}.`;
     await state(finalStatus, {
+      statusMessage: terminalMessage,
       finishedAt: meta.finishedAt,
       exitCode,
       signal,
       outputBytes: bytes,
       outputLines,
+      result: signal
+        ? undefined
+        : {
+            isError: exitCode !== 0,
+            runId: request.runId,
+            exitCode,
+            signal,
+            outputBytes: bytes,
+            outputLines,
+          },
     });
+    await writeCompletionNotification(request, finalStatus, terminalMessage).catch(() => undefined);
     await pruneRunStore({
       root: request.runRoot,
       now: finishedAtMs,
@@ -235,12 +254,19 @@ export async function runDurableTask(requestPath: string): Promise<number> {
       upstreamFullOutputPath: null,
     });
     await state("failed", {
+      statusMessage: message,
       finishedAt: new Date(finishedAtMs).toISOString(),
       exitCode: 1,
       signal: null,
       outputBytes: bytes,
       outputLines,
+      error: {
+        code: -32603,
+        message,
+        data: { runId: request.runId },
+      },
     }).catch(() => undefined);
+    await writeCompletionNotification(request, "failed", message).catch(() => undefined);
     return 1;
   }
 }

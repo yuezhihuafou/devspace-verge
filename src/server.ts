@@ -437,6 +437,13 @@ function registerMcpSurface(
             reason: z.string(),
           }),
         ]),
+        pendingTasks: z.array(z.object({
+          taskId: z.string(),
+          runId: z.string(),
+          status: z.enum(["completed", "cancelled", "failed"]),
+          statusMessage: z.string().optional(),
+          lastUpdatedAt: z.string(),
+        })).optional(),
         instruction: z.string(),
       },
       ...workspaceAppDescriptorMeta(config),
@@ -458,6 +465,9 @@ function registerMcpSurface(
         workspaceId: workspace.id,
         root: workspace.root,
       });
+      const pendingTasks = durableTasks?.available
+        ? await durableTasks.pendingNotifications(workspace.root)
+        : [];
       const preloadSubagents = config.subagents.enabled
         && config.subagents.instructions === "preload";
       const subagentsSkill = workspace.skills.find((skill) => skill.name === "subagents");
@@ -543,6 +553,9 @@ function registerMcpSurface(
             visibleAgents.length > 0
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
+            pendingTasks.length > 0
+              ? `Pending durable task notifications: ${pendingTasks.map((task) => `${task.taskId}=${task.status}`).join(", ")}. Use task_get for each task before starting dependent work.`
+              : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
         },
@@ -591,6 +604,7 @@ function registerMcpSurface(
           sourceRoot: workspace.sourceRoot,
           worktree: workspace.worktree,
           review,
+          ...(pendingTasks.length > 0 ? { pendingTasks } : {}),
           ...(includeBootstrapContext
             ? {
                 agentsFiles: loadedAgentsFiles,

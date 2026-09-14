@@ -37,6 +37,7 @@ export interface WriteStdinInput {
 
 export interface ProcessSnapshot {
   sessionId?: number;
+  taskId?: string;
   runId: string;
   command: string;
   output: string;

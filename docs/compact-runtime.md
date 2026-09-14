@@ -23,16 +23,31 @@ state, duration, output size, a preview, and the `runId`.
 On the Codex-compatible tool surface, command and poll wait budgets are managed
 by DevSpace instead of exposed as model-controlled arguments. Non-interactive
 commands use a durable local runner when the built runner is available. A long
-durable command returns after a short bounded wait with a `runId`, continues
-outside the DevSpace server process, and keeps writing `task.json`,
-`output.log`, and finally `meta.json` under the same run directory. On Linux
-with a working user systemd manager the runner is launched as a separate
-transient user service, so restarting DevSpace does not stop the command.
+durable command returns after a short bounded wait with a high-entropy `taskId`
+plus the local `runId`, continues outside the DevSpace server process, and keeps
+writing `task.json`, `output.log`, and finally `meta.json` under the same run
+directory. On Linux with a working user systemd manager the runner is launched
+as a separate transient user service, so restarting DevSpace does not stop the
+command.
 
-Use `devspace-log meta <runId>` to check a durable command. While it is running,
-the result comes from `task.json`; after completion it comes from `meta.json`.
-The task file is heartbeat-updated and stale running state is reported as
-unknown rather than assumed to be alive forever.
+The local task lifecycle mirrors the MCP Tasks extension. The compatibility
+tools `task_get`, `task_update`, and `task_cancel` correspond to `tasks/get`,
+`tasks/update`, and `tasks/cancel` while the connected host does not advertise
+`io.modelcontextprotocol/tasks`. Task states and metadata use the extension
+vocabulary: `working`, `input_required`, `completed`, `cancelled`, `failed`,
+`createdAt`, `lastUpdatedAt`, `ttlMs`, and `pollIntervalMs`. A command that exits
+non-zero is still `completed` with `isError=true` in its final task result;
+`failed` is reserved for task/infrastructure failures.
+
+Terminal tasks write a small completion notification scoped to the workspace
+root. Re-opening the same project from a later conversation surfaces pending
+notifications even when the new conversation receives a different
+`workspaceId`. Calling `task_get` on a terminal task acknowledges its
+notification. There is deliberately no task-list operation.
+
+`devspace-log meta <runId>` remains available as a low-level diagnostic view.
+While a durable task is running, it reads `task.json`; after completion it reads
+`meta.json`.
 
 Interactive/TTY commands keep the existing process-session path and may return
 a `sessionId`. `process_status` is non-blocking for those sessions, and
