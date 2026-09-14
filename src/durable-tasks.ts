@@ -201,6 +201,7 @@ export class DurableTaskManager {
       try {
         await execFileAsync("systemd-run", [
           "--user",
+          "--collect",
           `--unit=${input.unitName}`,
           "--property=Type=exec",
           "--property=KillMode=control-group",
