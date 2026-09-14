@@ -322,7 +322,9 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       );
       if (snapshot.taskId && durableTasks?.available) {
         const workspace = await workspaces.getWorkspace(workspaceId);
-        const task = await durableTasks.get(workspace.root, snapshot.taskId, { acknowledge: false });
+        const task = await durableTasks.get(workspace.root, snapshot.taskId, {
+          acknowledge: !snapshot.running,
+        });
         return processToolResponse(snapshot, task);
       }
       return processToolResponse(snapshot);

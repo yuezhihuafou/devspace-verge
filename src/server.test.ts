@@ -130,16 +130,29 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
   assert.equal(typeof commandState.runId, "string");
   assert.equal(commandState.resultType, "complete");
 
+  const afterSynchronousResult = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-sync"));
+  assert.equal(afterSynchronousResult.pendingTasks, undefined);
+
+  assert.ok(context.durableTasks);
+  const asyncSnapshot = await context.durableTasks.start({
+    workspaceId: workspaceId as string,
+    workspaceRoot: context.project,
+    cwd: context.project,
+    command: `${JSON.stringify(process.execPath)} -e "setTimeout(() => console.log('async-task-ok'), 120)"`,
+  }, 5);
+  assert.ok(asyncSnapshot.taskId);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
   const reopened = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-b"));
   const resumedWorkspaceId = reopened.workspaceId;
   assert.equal(typeof resumedWorkspaceId, "string");
   assert.notEqual(resumedWorkspaceId, workspaceId);
   const pending = reopened.pendingTasks as Array<{ taskId?: string }> | undefined;
-  assert.ok(pending?.some((task) => task.taskId === commandState.taskId));
+  assert.ok(pending?.some((task) => task.taskId === asyncSnapshot.taskId));
 
   const task = await context.client.callTool({
     name: "task_get",
-    arguments: { workspaceId: resumedWorkspaceId, taskId: commandState.taskId },
+    arguments: { workspaceId: resumedWorkspaceId, taskId: asyncSnapshot.taskId },
   });
   const taskState = structuredContent(task);
   assert.equal(taskState.resultType, "complete");
