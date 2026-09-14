@@ -79,6 +79,37 @@ test("codex process tools keep wait and output budgets server-managed", async (t
   }
 });
 
+test("codex devspace-log responses satisfy the process output schema", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const workspaceId = opened.workspaceId;
+  assert.equal(typeof workspaceId, "string");
+
+  const command = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId, cmd: "printf 'log-probe\\n'" },
+  });
+  const runId = structuredContent(command).runId;
+  assert.equal(typeof runId, "string");
+
+  const previousRunRoot = process.env.DEVSPACE_COMPACT_RUN_ROOT;
+  process.env.DEVSPACE_COMPACT_RUN_ROOT = join(context.project, "..", ".runs");
+  try {
+    const log = await context.client.callTool({
+      name: "exec_command",
+      arguments: { workspaceId, cmd: `devspace-log meta ${runId}` },
+    });
+    const structured = structuredContent(log);
+    assert.equal(structured.running, false);
+    assert.equal(structured.idleTimeMs, 0);
+    assert.equal(structured.nextPollMs, 0);
+    assert.equal(structured.runId, runId);
+  } finally {
+    if (previousRunRoot === undefined) delete process.env.DEVSPACE_COMPACT_RUN_ROOT;
+    else process.env.DEVSPACE_COMPACT_RUN_ROOT = previousRunRoot;
+  }
+});
+
 test("UI metadata is limited to workspace and aggregate review", async (t) => {
   for (const uiEnabled of [true, false]) {
     await t.test(uiEnabled ? "enabled" : "disabled", async (nested) => {

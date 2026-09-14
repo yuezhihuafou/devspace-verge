@@ -123,6 +123,8 @@ function runLogToolResponse(command: string, result: string) {
       runId,
       running: false,
       wallTimeMs: 0,
+      idleTimeMs: 0,
+      nextPollMs: 0,
       outputBytes: Buffer.byteLength(result, "utf8"),
       outputLines: result === "" ? 0 : result.split(/\r?\n/).length,
       outputTruncated: false,
