@@ -21,6 +21,14 @@ try {
   assert.equal(await handleRunLogCommand(`devspace-log read ${success.runId} 2 1`), "beta");
   assert.equal(await handleRunLogCommand(`devspace-log tail ${success.runId} 1`), "gamma");
   assert.equal(await handleRunLogCommand(`devspace-log grep ${success.runId} beta`), "beta");
+  await assert.rejects(
+    () => handleRunLogCommand(`devspace-log meta ${success.runId}; echo should-not-run`),
+    /cannot be chained with shell operators/,
+  );
+  await assert.rejects(
+    () => handleRunLogCommand(`devspace-log read ${success.runId} 1 1 && echo should-not-run`),
+    /cannot be chained with shell operators/,
+  );
   const meta = JSON.parse(await handleRunLogCommand(`devspace-log meta ${success.runId}`) as string);
   assert.equal(meta.exitCode, 0);
   assert.equal(await readFile(meta.outputPath, "utf8"), "alpha\nbeta\ngamma");

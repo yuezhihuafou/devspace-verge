@@ -22,7 +22,13 @@ import {
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
 const CODEX_EXEC_YIELD_MS = 5_000;
+const CODEX_LONG_EXEC_YIELD_MS = 1_000;
 const CODEX_INTERACTIVE_YIELD_MS = 250;
+
+function execYieldMs(command: string): number {
+  const likelyLong = /(?:^|[;&|]\s*)(?:sleep\s+\d|(?:pnpm|npm|yarn|bun)\s+(?:test|build|run\s+(?:test|build))|(?:node|tsx)\s+--test\b|pytest\b|colcon\s+(?:build|test)\b|cmake\s+--build\b|(?:make|ninja)\b|cargo\s+(?:test|build|clippy)\b|go\s+test\b|mvn\b|gradle\b)/i.test(command);
+  return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
+}
 
 const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, and exec_command for inspection, tests, builds, and other commands. Non-interactive long-running commands return a durable taskId and runId without keeping the MCP call open and continue across DevSpace restarts. Use task_get for durable task state, task_update only when a task reports input_required, and task_cancel to request cancellation. Honor pollIntervalMs and do not create tight polling loops. process_status and write_stdin are only for interactive or compatibility process sessions that returned a sessionId. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
 
@@ -225,8 +231,8 @@ function processOutputSchema(): z.ZodRawShape {
     exitCode: z.number().int().optional(),
     signal: z.string().optional(),
     wallTimeMs: z.number().nonnegative(),
-    idleTimeMs: z.number().nonnegative(),
-    nextPollMs: z.number().nonnegative(),
+    idleTimeMs: z.number().nonnegative().optional(),
+    nextPollMs: z.number().nonnegative().optional(),
     outputBytes: z.number().nonnegative(),
     outputLines: z.number().nonnegative(),
     outputTruncated: z.boolean(),
@@ -236,7 +242,8 @@ function processOutputSchema(): z.ZodRawShape {
 
 function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) {
   const result = processResult(snapshot);
-  const resultType = snapshot.taskId && snapshot.running ? "task" : "complete";
+  const isTask = Boolean(snapshot.taskId && snapshot.running);
+  const resultType = isTask ? "task" : "complete";
   const content = [textBlock(result)];
   return {
     content,
@@ -245,20 +252,24 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
       result,
       resultType,
       sessionId: snapshot.sessionId,
-      taskId: snapshot.taskId,
-      status: task?.status,
-      statusMessage: task?.statusMessage,
-      createdAt: task?.createdAt,
-      lastUpdatedAt: task?.lastUpdatedAt,
-      ttlMs: task?.ttlMs,
-      pollIntervalMs: task?.pollIntervalMs,
+      ...(isTask ? {
+        taskId: snapshot.taskId,
+        status: task?.status,
+        statusMessage: task?.statusMessage,
+        createdAt: task?.createdAt,
+        lastUpdatedAt: task?.lastUpdatedAt,
+        ttlMs: task?.ttlMs,
+        pollIntervalMs: task?.pollIntervalMs,
+      } : {}),
       runId: snapshot.runId,
       running: snapshot.running,
       exitCode: snapshot.exitCode,
       signal: snapshot.signal,
       wallTimeMs: snapshot.wallTimeMs,
-      idleTimeMs: snapshot.idleTimeMs,
-      nextPollMs: recommendedPollMs(snapshot),
+      ...(snapshot.running ? {
+        idleTimeMs: snapshot.idleTimeMs,
+        nextPollMs: recommendedPollMs(snapshot),
+      } : {}),
       outputBytes: snapshot.outputBytes,
       outputLines: snapshot.outputLines,
       outputTruncated: snapshot.outputTruncated,
@@ -439,7 +450,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
               cwd,
               workspaceRoot: workspace.root,
               tty: false,
-            }, CODEX_EXEC_YIELD_MS);
+            }, execYieldMs(cmd));
           }
           return processSessions.start({
             workspaceId,
@@ -449,7 +460,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             tty,
             columns,
             rows,
-            yieldTimeMs: CODEX_EXEC_YIELD_MS,
+            yieldTimeMs: execYieldMs(cmd),
           });
         },
       );

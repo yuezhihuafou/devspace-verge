@@ -10,9 +10,24 @@ const MAX_MATCHES = 200;
 const MAX_RETURN_CHARS = 20_000;
 const MAX_BYTE_READ = 32 * 1024;
 
+function dayFromRunId(runId: string): string | undefined {
+  const match = /^run_(\d{4})(\d{2})(\d{2})\d{6}_[A-Za-z0-9_]+$/.exec(runId);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : undefined;
+}
+
 async function findRunDir(runId: string): Promise<string> {
   if (!RUN_RE.test(runId)) throw new Error("invalid runId");
   const root = runStoreRoot();
+  const directDay = dayFromRunId(runId);
+  if (directDay) {
+    const candidate = path.join(root, directDay, runId);
+    try {
+      const entries = await readdir(candidate);
+      if (entries.includes("output.log") || entries.includes("meta.json")) return candidate;
+    } catch {
+      // Fall back to scanning for older/custom run identifiers.
+    }
+  }
   const days = (await readdir(root, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
@@ -125,6 +140,10 @@ async function readBytes(filePath: string, offsetValue?: string, lengthValue?: s
 }
 
 export async function handleRunLogCommand(command: string): Promise<string | null> {
+  if (!command.trimStart().startsWith("devspace-log")) return null;
+  if (/[;&|]/.test(command)) {
+    throw new Error("devspace-log is an internal bounded log query and cannot be chained with shell operators");
+  }
   const parts = command.trim().split(/\s+/);
   if (parts[0] !== "devspace-log") return null;
   const action = parts[1];

@@ -127,7 +127,8 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
     },
   });
   const commandState = structuredContent(command);
-  assert.equal(typeof commandState.taskId, "string");
+  assert.equal(commandState.taskId, undefined);
+  assert.equal(commandState.status, undefined);
   assert.equal(typeof commandState.runId, "string");
   assert.equal(commandState.resultType, "complete");
 
@@ -167,6 +168,28 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
   const acknowledged = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-c"));
   assert.equal(acknowledged.pendingTasks, undefined);
   assert.equal(acknowledged.pendingTaskCount, undefined);
+});
+
+test("known long codex commands detach early instead of occupying the MCP request", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true });
+  const opened = structuredContent(await callOpen(context.client, context.project, "task-early-detach"));
+  const startedAt = performance.now();
+  const response = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId: opened.workspaceId, cmd: "sleep 3" },
+  });
+  const elapsedMs = performance.now() - startedAt;
+  const state = structuredContent(response);
+  assert.equal(state.resultType, "task");
+  assert.equal(typeof state.taskId, "string");
+  assert.ok(elapsedMs < 2_500, `expected early detach, got ${Math.round(elapsedMs)}ms`);
+  assert.ok((state.pollIntervalMs as number) > 0);
+  assert.ok(context.durableTasks);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const task = await context.durableTasks.get(context.project, state.taskId as string, { acknowledge: false });
+    if (task.status !== "working" && task.status !== "input_required") break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 });
 
 test("UI metadata is limited to workspace and aggregate review", async (t) => {
