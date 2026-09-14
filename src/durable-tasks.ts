@@ -258,7 +258,7 @@ export class DurableTaskManager {
     const directory = path.join(this.runRoot, ".task-notifications", workspaceKey(workspaceRoot));
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
     const notifications: DurableTaskNotification[] = [];
-    for (const entry of entries.filter((candidate) => candidate.isFile()).slice(0, 20)) {
+    for (const entry of entries.filter((candidate) => candidate.isFile())) {
       try {
         const parsed = JSON.parse(await readFile(path.join(directory, entry.name), "utf8")) as DurableTaskNotification & { root?: string };
         if (parsed.root && path.resolve(parsed.root) !== path.resolve(workspaceRoot)) continue;

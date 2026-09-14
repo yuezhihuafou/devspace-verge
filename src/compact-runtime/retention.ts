@@ -1,4 +1,5 @@
-import { readdir, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 const DEFAULT_RETENTION_DAYS = 30;
@@ -26,6 +27,27 @@ interface StoredRun {
   path: string;
   bytes: number;
   completed: boolean;
+}
+
+function workspaceKey(workspaceRoot: string): string {
+  return createHash("sha256").update(path.resolve(workspaceRoot)).digest("hex").slice(0, 32);
+}
+
+async function removeRun(root: string, run: StoredRun): Promise<void> {
+  let task: { taskId?: string; root?: string } | undefined;
+  try {
+    task = JSON.parse(await readFile(path.join(run.path, "task.json"), "utf8")) as { taskId?: string; root?: string };
+  } catch {
+    // Runs created before durable tasks may not have task metadata.
+  }
+  await rm(run.path, { recursive: true, force: true });
+  if (!task?.taskId) return;
+  await rm(path.join(root, ".task-index", `${task.taskId}.json`), { force: true });
+  if (task.root) {
+    const key = workspaceKey(task.root);
+    await rm(path.join(root, ".task-notifications", key, `${task.taskId}.json`), { force: true });
+    await rm(path.join(root, ".task-active", key, `${task.taskId}.json`), { force: true });
+  }
 }
 
 async function listRuns(root: string): Promise<StoredRun[]> {
@@ -98,7 +120,7 @@ export async function pruneRunStore(input: {
     if (!run.completed || run.runId === input.protectRunId) continue;
     const dayTime = Date.parse(`${run.day}T00:00:00Z`);
     if (Number.isFinite(dayTime) && dayTime < cutoff) {
-      await rm(run.path, { recursive: true, force: true });
+      await removeRun(input.root, run);
     }
   }
 
@@ -107,7 +129,7 @@ export async function pruneRunStore(input: {
   for (const run of runs) {
     if (total <= maxBytes) break;
     if (!run.completed || run.runId === input.protectRunId) continue;
-    await rm(run.path, { recursive: true, force: true });
+    await removeRun(input.root, run);
     total -= run.bytes;
   }
 

@@ -441,9 +441,9 @@ function registerMcpSurface(
           taskId: z.string(),
           runId: z.string(),
           status: z.enum(["completed", "cancelled", "failed"]),
-          statusMessage: z.string().optional(),
           lastUpdatedAt: z.string(),
         })).optional(),
+        pendingTaskCount: z.number().int().nonnegative().optional(),
         instruction: z.string(),
       },
       ...workspaceAppDescriptorMeta(config),
@@ -465,9 +465,15 @@ function registerMcpSurface(
         workspaceId: workspace.id,
         root: workspace.root,
       });
-      const pendingTasks = durableTasks?.available
+      const allPendingTasks = durableTasks?.available
         ? await durableTasks.pendingNotifications(workspace.root)
         : [];
+      const pendingTasks = allPendingTasks.slice(0, 8).map((task) => ({
+        taskId: task.taskId,
+        runId: task.runId,
+        status: task.status,
+        lastUpdatedAt: task.lastUpdatedAt,
+      }));
       const preloadSubagents = config.subagents.enabled
         && config.subagents.instructions === "preload";
       const subagentsSkill = workspace.skills.find((skill) => skill.name === "subagents");
@@ -554,7 +560,7 @@ function registerMcpSurface(
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
             pendingTasks.length > 0
-              ? `Pending durable task notifications: ${pendingTasks.map((task) => `${task.taskId}=${task.status}`).join(", ")}. Use task_get for each task before starting dependent work.`
+              ? `Pending durable task notifications (${allPendingTasks.length} total): ${pendingTasks.map((task) => `${task.taskId}=${task.status}`).join(", ")}. Use task_get for each shown task before starting dependent work; reopen the workspace after acknowledging them if more remain.`
               : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
@@ -604,7 +610,7 @@ function registerMcpSurface(
           sourceRoot: workspace.sourceRoot,
           worktree: workspace.worktree,
           review,
-          ...(pendingTasks.length > 0 ? { pendingTasks } : {}),
+          ...(pendingTasks.length > 0 ? { pendingTasks, pendingTaskCount: allPendingTasks.length } : {}),
           ...(includeBootstrapContext
             ? {
                 agentsFiles: loadedAgentsFiles,

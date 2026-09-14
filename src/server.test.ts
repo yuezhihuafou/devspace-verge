@@ -147,8 +147,12 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
   const resumedWorkspaceId = reopened.workspaceId;
   assert.equal(typeof resumedWorkspaceId, "string");
   assert.notEqual(resumedWorkspaceId, workspaceId);
-  const pending = reopened.pendingTasks as Array<{ taskId?: string }> | undefined;
+  assert.equal(reopened.pendingTaskCount, 1);
+  const pending = reopened.pendingTasks as Array<Record<string, unknown>> | undefined;
   assert.ok(pending?.some((task) => task.taskId === asyncSnapshot.taskId));
+  assert.equal("root" in (pending?.[0] ?? {}), false);
+  assert.equal("schemaVersion" in (pending?.[0] ?? {}), false);
+  assert.equal("statusMessage" in (pending?.[0] ?? {}), false);
 
   const task = await context.client.callTool({
     name: "task_get",
@@ -161,6 +165,7 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
 
   const acknowledged = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-c"));
   assert.equal(acknowledged.pendingTasks, undefined);
+  assert.equal(acknowledged.pendingTaskCount, undefined);
 });
 
 test("UI metadata is limited to workspace and aggregate review", async (t) => {

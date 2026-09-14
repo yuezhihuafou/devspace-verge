@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -55,6 +56,20 @@ try {
   process.env.DEVSPACE_COMPACT_LOG_RETENTION_DAYS = "1";
   const oldRun = await makeRun("2026-09-01", "run_20260901010000_eeeeeeee", 10);
   const oldActive = await makeRun("2026-09-01", "run_20260901020000_ffffffff", 10, false);
+  const taskRun = await makeRun("2026-09-01", "run_20260901030000_gggggggg", 10);
+  const taskId = "task_00000000-0000-4000-8000-000000000001";
+  const workspaceRoot = path.join(root, "project");
+  const workspaceHash = createHash("sha256").update(path.resolve(workspaceRoot)).digest("hex").slice(0, 32);
+  const taskIndex = path.join(root, ".task-index", `${taskId}.json`);
+  const taskNotification = path.join(root, ".task-notifications", workspaceHash, `${taskId}.json`);
+  const taskActive = path.join(root, ".task-active", workspaceHash, `${taskId}.json`);
+  await mkdir(path.dirname(taskIndex), { recursive: true });
+  await mkdir(path.dirname(taskNotification), { recursive: true });
+  await mkdir(path.dirname(taskActive), { recursive: true });
+  await writeFile(path.join(taskRun, "task.json"), `${JSON.stringify({ taskId, root: workspaceRoot })}\n`);
+  await writeFile(taskIndex, "{}\n");
+  await writeFile(taskNotification, "{}\n");
+  await writeFile(taskActive, "{}\n");
   await pruneRunStore({
     root,
     now: Date.parse("2026-09-05T12:00:00Z"),
@@ -62,6 +77,10 @@ try {
   });
   assert.equal(await exists(oldRun), false);
   assert.equal(await exists(oldActive), true);
+  assert.equal(await exists(taskRun), false);
+  assert.equal(await exists(taskIndex), false);
+  assert.equal(await exists(taskNotification), false);
+  assert.equal(await exists(taskActive), false);
   assert.equal(await exists(newest), true);
 } finally {
   if (previousMax === undefined) delete process.env.DEVSPACE_COMPACT_LOG_MAX_BYTES;
