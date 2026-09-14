@@ -21,18 +21,24 @@ The MCP-visible result stays bounded and includes status, exit code or running
 state, duration, output size, a preview, and the `runId`.
 
 On the Codex-compatible tool surface, command and poll wait budgets are managed
-by DevSpace instead of exposed as model-controlled arguments. A long command
-returns a running `sessionId` after a short bounded wait, and subsequent polls
-also return promptly if the process is still running. This avoids turning a
-healthy multi-minute local job into a single long-blocking MCP call while the
-full output continues to be persisted under the same `runId`.
+by DevSpace instead of exposed as model-controlled arguments. Non-interactive
+commands use a durable local runner when the built runner is available. A long
+durable command returns after a short bounded wait with a `runId`, continues
+outside the DevSpace server process, and keeps writing `task.json`,
+`output.log`, and finally `meta.json` under the same run directory. On Linux
+with a working user systemd manager the runner is launched as a separate
+transient user service, so restarting DevSpace does not stop the command.
 
-Long-running status checks use `process_status`. It is non-blocking and does not
-consume buffered process output. The response includes `idleTimeMs` and a
-server-managed `nextPollMs` hint that backs off from 5 seconds to 60 seconds as
-jobs run longer or remain idle. `write_stdin` remains available for actual
-process interaction, Ctrl-C, PTY resize, and compatibility output collection;
-an empty compatibility poll returns immediately.
+Use `devspace-log meta <runId>` to check a durable command. While it is running,
+the result comes from `task.json`; after completion it comes from `meta.json`.
+The task file is heartbeat-updated and stale running state is reported as
+unknown rather than assumed to be alive forever.
+
+Interactive/TTY commands keep the existing process-session path and may return
+a `sessionId`. `process_status` is non-blocking for those sessions, and
+`write_stdin` remains available for actual process interaction, Ctrl-C, PTY
+resize, and compatibility output collection. An empty compatibility poll
+returns immediately.
 
 Additional output can be requested with:
 

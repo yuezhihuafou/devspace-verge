@@ -39,6 +39,7 @@ import {
   modernMcpAdapterErrorLogFields,
   type McpRegistrationTarget,
 } from "./mcp-modern-server.js";
+import { DurableTaskManager } from "./durable-tasks.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
@@ -313,6 +314,7 @@ export function createMcpServer(
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
+  durableTasks?: DurableTaskManager,
 ): McpServer {
   const toolSurface = getToolSurface(config.toolMode);
   const server = new McpServer(
@@ -331,6 +333,7 @@ export function createMcpServer(
     resolveLocalAgentProviders,
     incomingArtifactAdapters,
     trackToolActivity,
+    durableTasks,
   );
   return server;
 }
@@ -344,6 +347,7 @@ function registerMcpSurface(
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
+  durableTasks?: DurableTaskManager,
 ): void {
   const registrationTarget = trackToolActivity
     ? withTrackedToolHandlers(server, trackToolActivity)
@@ -688,6 +692,7 @@ function registerMcpSurface(
     config,
     workspaces,
     processSessions,
+    durableTasks,
   });
 
   registerAppTool(
@@ -810,6 +815,7 @@ export function createServer(
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
+  const durableTasks = new DurableTaskManager();
   const toolActivities = new ToolActivityTracker();
   const localAgentProviders = buildLocalAgentProviderStatuses(
     config.subagents,
@@ -830,6 +836,7 @@ export function createServer(
       resolveLocalAgentProviders,
       incomingArtifactAdapters,
       toolActivities.track,
+      durableTasks,
     );
   });
   const logMcpHandlerError = (error: Error) => logEvent(

@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { DurableTaskManager } from "../durable-tasks.js";
 import type { ProcessSessionManager } from "../process-sessions.js";
 import type { ServerConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspaces.js";
@@ -78,6 +79,7 @@ export interface ToolRegistrationContext {
   config: ServerConfig;
   workspaces: WorkspaceRegistry;
   processSessions: ProcessSessionManager;
+  durableTasks?: DurableTaskManager;
 }
 
 export interface ToolInstructionContext {

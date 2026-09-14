@@ -139,13 +139,27 @@ export async function handleRunLogCommand(command: string): Promise<string | nul
     try {
       return (await readFile(path.join(runDir, "meta.json"), "utf8")).trimEnd();
     } catch {
-      const info = await stat(outputPath);
-      return JSON.stringify({
-        schemaVersion: 1,
-        runId,
-        running: true,
-        outputBytes: info.size,
-      }, null, 2);
+      try {
+        const task = JSON.parse(await readFile(path.join(runDir, "task.json"), "utf8")) as Record<string, unknown>;
+        const status = typeof task.status === "string" ? task.status : "unknown";
+        const updatedAt = typeof task.updatedAt === "string" ? Date.parse(task.updatedAt) : Number.NaN;
+        const stale = (status === "starting" || status === "running")
+          && Number.isFinite(updatedAt)
+          && Date.now() - updatedAt > 60_000;
+        return JSON.stringify({
+          ...task,
+          running: !stale && (status === "starting" || status === "running"),
+          ...(stale ? { stale: true, status: "unknown" } : {}),
+        }, null, 2);
+      } catch {
+        const info = await stat(outputPath);
+        return JSON.stringify({
+          schemaVersion: 1,
+          runId,
+          running: true,
+          outputBytes: info.size,
+        }, null, 2);
+      }
     }
   }
 

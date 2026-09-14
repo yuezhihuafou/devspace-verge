@@ -22,7 +22,7 @@ type CodexRegistration = (context: ToolRegistrationContext) => void;
 const CODEX_EXEC_YIELD_MS = 5_000;
 const CODEX_INTERACTIVE_YIELD_MS = 250;
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, process_status for non-blocking checks of long-running processes, and write_stdin only for process interaction or compatibility output collection. Long-running commands return a running session after a short bounded wait. Respect nextPollMs, do independent work between checks when possible, and do not create tight polling loops. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, and exec_command for inspection, tests, builds, and other commands. Non-interactive commands use durable local execution when available: a long-running command returns a runId without keeping the MCP call open, continues across DevSpace restarts, and is checked with devspace-log meta <runId>. process_status and write_stdin are for interactive or compatibility process sessions that returned a sessionId. Respect nextPollMs, do independent work between checks when possible, and do not create tight polling loops. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -49,7 +49,9 @@ function recommendedPollMs(snapshot: Pick<ProcessSnapshot, "running" | "wallTime
 function processResult(snapshot: ProcessSnapshot): string {
   const isError = Boolean(snapshot.signal) || (!snapshot.running && (snapshot.exitCode ?? 0) !== 0);
   const status = snapshot.running
-    ? `running session=${snapshot.sessionId}`
+    ? snapshot.sessionId === undefined
+      ? `running task=${snapshot.runId}`
+      : `running session=${snapshot.sessionId}`
     : snapshot.signal
       ? `signal=${snapshot.signal}`
       : `exit=${snapshot.exitCode ?? "unknown"}`;
@@ -64,7 +66,7 @@ function processResult(snapshot: ProcessSnapshot): string {
   if (snapshot.logError) {
     lines.push(`log=unavailable; warning=full local log persistence failed: ${snapshot.logError}`);
   } else {
-    lines.push(`log=${snapshot.runId}; more=devspace-log read ${snapshot.runId} 1 80; search=devspace-log grep ${snapshot.runId} <pattern>`);
+    lines.push(`log=${snapshot.runId}; status=devspace-log meta ${snapshot.runId}; more=devspace-log read ${snapshot.runId} 1 80; search=devspace-log grep ${snapshot.runId} <pattern>`);
   }
   return lines.join("\n");
 }
@@ -185,14 +187,14 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
 }
 
 function registerCodexProcessTools(context: ToolRegistrationContext): void {
-  const { server, config, workspaces, processSessions } = context;
+  const { server, config, workspaces, processSessions, durableTasks } = context;
 
   server.registerTool(
     "exec_command",
     {
       title: "Execute command",
       description:
-        "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Full output is persisted locally; the MCP result is compact and includes a runId. Long-running commands return promptly with a sessionId instead of holding the tool call open. devspace-log commands are handled internally for bounded log retrieval.",
+        "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Full output is persisted locally; the MCP result is compact and includes a runId. Non-interactive commands use durable local execution when available and survive DevSpace restarts; long-running durable commands return promptly with a runId and no sessionId. Interactive/TTY commands use process sessions. devspace-log commands are handled internally for bounded log retrieval.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -223,6 +225,15 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         async () => {
           const workspace = await workspaces.getWorkspace(workspaceId);
           const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
+          if (!tty && durableTasks?.available) {
+            return durableTasks.start({
+              workspaceId,
+              command: cmd,
+              cwd,
+              workspaceRoot: workspace.root,
+              tty: false,
+            }, CODEX_EXEC_YIELD_MS);
+          }
           return processSessions.start({
             workspaceId,
             command: cmd,
@@ -244,7 +255,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Check process status",
       description:
-        "Check a long-running process without waiting and without consuming its buffered output. Returns current state, output counters, idle time, and a server-recommended nextPollMs. Prefer this over repeated write_stdin polling.",
+        "Check an interactive or compatibility process session without waiting and without consuming its buffered output. Use this only when exec_command returned a sessionId. Durable non-interactive commands return a runId instead; check those with devspace-log meta <runId>.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
