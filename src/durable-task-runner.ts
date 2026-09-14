@@ -20,6 +20,7 @@ export interface DurableTaskRequest {
   taskPath: string;
   metaPath: string;
   notificationPath: string;
+  activePath: string;
   startedAt: string;
   ttlMs: number | null;
   env: Record<string, string>;
@@ -221,6 +222,7 @@ export async function runDurableTask(requestPath: string): Promise<number> {
           },
     });
     await writeCompletionNotification(request, finalStatus, terminalMessage).catch(() => undefined);
+    await unlink(request.activePath).catch(() => undefined);
     await pruneRunStore({
       root: request.runRoot,
       now: finishedAtMs,
@@ -267,6 +269,7 @@ export async function runDurableTask(requestPath: string): Promise<number> {
       },
     }).catch(() => undefined);
     await writeCompletionNotification(request, "failed", message).catch(() => undefined);
+    await unlink(request.activePath).catch(() => undefined);
     return 1;
   }
 }

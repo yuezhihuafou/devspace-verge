@@ -31,6 +31,7 @@ test("durable task runner persists output and terminal metadata", async () => {
       taskPath: path.join(runDir, "task.json"),
       metaPath: path.join(runDir, "meta.json"),
       notificationPath: path.join(runDir, "notification.json"),
+      activePath: path.join(runDir, "active.json"),
       startedAt: new Date().toISOString(),
       ttlMs: 30 * 24 * 60 * 60 * 1_000,
       env: Object.fromEntries(
@@ -191,6 +192,38 @@ test("terminal tasks persist a completion notification until task_get acknowledg
     const task = await manager.get(process.cwd(), snapshot.taskId);
     assert.equal(task.status, "completed");
     assert.deepEqual(await manager.pendingNotifications(process.cwd()), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stale task whose runner disappeared is reconciled to failed", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-durable-stale-"));
+  try {
+    const manager = new DurableTaskManager({
+      runRoot: root,
+      runnerPath: "test-runner",
+      launchTask: async () => undefined,
+    });
+    const workspaceRoot = process.cwd();
+    const snapshot = await manager.start({
+      workspaceId: "workspace-stale",
+      workspaceRoot,
+      cwd: workspaceRoot,
+      command: "sleep 60",
+    }, 0);
+    assert.ok(snapshot.taskId);
+    const indexPath = path.join(root, ".task-index", `${snapshot.taskId}.json`);
+    const pointer = JSON.parse(await readFile(indexPath, "utf8")) as { taskPath: string };
+    const state = JSON.parse(await readFile(pointer.taskPath, "utf8")) as Record<string, unknown>;
+    state.lastUpdatedAt = new Date(Date.now() - 120_000).toISOString();
+    await writeFile(pointer.taskPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+
+    const view = await manager.get(workspaceRoot, snapshot.taskId, { acknowledge: false });
+    assert.equal(view.status, "failed");
+    assert.match(view.error?.message ?? "", /runner exited/i);
+    const pending = await manager.pendingNotifications(workspaceRoot);
+    assert.ok(pending.some((item) => item.taskId === snapshot.taskId && item.status === "failed"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

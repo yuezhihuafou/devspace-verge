@@ -40,6 +40,14 @@ export interface DurableTaskNotification {
   lastUpdatedAt: string;
 }
 
+interface DurableTaskActiveMarker {
+  schemaVersion: 1;
+  taskId: string;
+  runId: string;
+  root: string;
+  taskPath: string;
+}
+
 function taskEnvironment(input: StartCommandInput): Record<string, string> {
   return {
     ...Object.fromEntries(
@@ -157,9 +165,11 @@ export class DurableTaskManager {
     const indexPath = this.taskIndexPath(taskId);
     const workspaceRoot = input.workspaceRoot ?? input.cwd;
     const notificationPath = this.notificationPath(workspaceRoot, taskId);
+    const activePath = this.activePath(workspaceRoot, taskId);
     await mkdir(runDir, { recursive: true, mode: 0o700 });
     await mkdir(path.dirname(indexPath), { recursive: true, mode: 0o700 });
     await mkdir(path.dirname(notificationPath), { recursive: true, mode: 0o700 });
+    await mkdir(path.dirname(activePath), { recursive: true, mode: 0o700 });
     await writeFile(outputPath, "", { mode: 0o600 });
     const startedAt = now.toISOString();
     await writeJsonAtomic(taskPath, {
@@ -196,6 +206,7 @@ export class DurableTaskManager {
       taskPath,
       metaPath,
       notificationPath,
+      activePath,
       startedAt,
       ttlMs: taskTtlMs(),
       env: taskEnvironment(input),
@@ -208,6 +219,13 @@ export class DurableTaskManager {
       runId,
       taskPath,
     });
+    await writeJsonAtomic(activePath, {
+      schemaVersion: 1,
+      taskId,
+      runId,
+      root: workspaceRoot,
+      taskPath,
+    } satisfies DurableTaskActiveMarker);
 
     await this.launch({ requestPath, unitName, runnerPath: this.runnerPath });
     const deadline = Date.now() + Math.max(0, waitMs);
@@ -224,8 +242,9 @@ export class DurableTaskManager {
     taskId: string,
     options: { acknowledge?: boolean } = {},
   ): Promise<DurableTaskView> {
-    const state = await this.findTask(taskId);
+    let state = await this.findTask(taskId);
     this.assertOwned(state, workspaceRoot);
+    state = await this.reconcileTask(state);
     const view = durableTaskView(state);
     if (options.acknowledge !== false
       && (view.status === "completed" || view.status === "cancelled" || view.status === "failed")) {
@@ -235,6 +254,7 @@ export class DurableTaskManager {
   }
 
   async pendingNotifications(workspaceRoot: string): Promise<DurableTaskNotification[]> {
+    await this.reconcileActiveTasks(workspaceRoot);
     const directory = path.join(this.runRoot, ".task-notifications", workspaceKey(workspaceRoot));
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
     const notifications: DurableTaskNotification[] = [];
@@ -374,6 +394,86 @@ export class DurableTaskManager {
     await writeJsonAtomic(taskPath, next);
   }
 
+  private async reconcileActiveTasks(workspaceRoot: string): Promise<void> {
+    const directory = path.join(this.runRoot, ".task-active", workspaceKey(workspaceRoot));
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.filter((candidate) => candidate.isFile()).slice(0, 100)) {
+      const markerPath = path.join(directory, entry.name);
+      try {
+        const marker = JSON.parse(await readFile(markerPath, "utf8")) as DurableTaskActiveMarker;
+        if (path.resolve(marker.root) !== path.resolve(workspaceRoot)) continue;
+        const state = await readState(this.validateTaskPath(marker.taskPath));
+        const reconciled = await this.reconcileTask(state);
+        if (reconciled.status !== "working" && reconciled.status !== "input_required") {
+          await unlink(markerPath).catch(() => undefined);
+        }
+      } catch {
+        // Leave unreadable markers alone; retention or manual inspection can recover them.
+      }
+    }
+  }
+
+  private async reconcileTask(state: DurableTaskState): Promise<DurableTaskState> {
+    if (state.status !== "working") return state;
+    if (await this.runnerIsAlive(state)) return state;
+
+    const finishedAt = new Date().toISOString();
+    const message = "Task runner exited without writing a terminal task state.";
+    const failed = {
+      ...state,
+      status: "failed" as const,
+      statusMessage: message,
+      lastUpdatedAt: finishedAt,
+      finishedAt,
+      error: {
+        code: -32603,
+        message,
+        data: { runId: state.runId },
+      },
+    } satisfies DurableTaskState;
+    await writeJsonAtomic(await this.findTaskPath(state.taskId), failed);
+    await writeJsonAtomic(this.notificationPath(state.root, state.taskId), {
+      schemaVersion: 1,
+      taskId: state.taskId,
+      root: state.root,
+      runId: state.runId,
+      status: "failed",
+      statusMessage: message,
+      lastUpdatedAt: finishedAt,
+    });
+    await unlink(this.activePath(state.root, state.taskId)).catch(() => undefined);
+    return failed;
+  }
+
+  private async runnerIsAlive(state: DurableTaskState): Promise<boolean> {
+    if (!this.launchOverride && state.unitName && systemdUserAvailable()) {
+      try {
+        const { stdout } = await execFileAsync(
+          "systemctl",
+          ["--user", "show", state.unitName, "--property=ActiveState", "--value"],
+          { timeout: 1_500, windowsHide: true },
+        );
+        const activeState = stdout.trim();
+        return activeState === "active" || activeState === "activating" || activeState === "reloading" || activeState === "deactivating";
+      } catch {
+        return false;
+      }
+    }
+
+    if (state.runnerPid) {
+      try {
+        process.kill(state.runnerPid, 0);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") return true;
+        return false;
+      }
+    }
+
+    const updatedAt = Date.parse(state.lastUpdatedAt);
+    return !Number.isFinite(updatedAt) || Date.now() - updatedAt <= TASK_HEARTBEAT_STALE_MS;
+  }
+
   private async findTaskPath(taskId: string): Promise<string> {
     try {
       const pointer = JSON.parse(await readFile(this.taskIndexPath(taskId), "utf8")) as { taskPath?: string };
@@ -393,6 +493,15 @@ export class DurableTaskManager {
     return path.join(
       this.runRoot,
       ".task-notifications",
+      workspaceKey(workspaceRoot),
+      `${taskId}.json`,
+    );
+  }
+
+  private activePath(workspaceRoot: string, taskId: string): string {
+    return path.join(
+      this.runRoot,
+      ".task-active",
       workspaceKey(workspaceRoot),
       `${taskId}.json`,
     );
