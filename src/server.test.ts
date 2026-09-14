@@ -16,6 +16,7 @@ import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { DurableTaskManager } from "./durable-tasks.js";
 import { runDurableTask } from "./durable-task-runner.js";
+import { SerenaSemanticManager } from "./serena-semantic.js";
 import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
@@ -664,6 +665,7 @@ async function fixture(
     toolMode?: ToolMode;
     uiEnabled?: boolean;
     durableTasks?: boolean;
+    semantic?: SerenaSemanticManager;
   } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
@@ -752,6 +754,7 @@ async function fixture(
     [],
     undefined,
     durableTasks,
+    options.semantic,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "devspace-test-client", version: "1.0.0" });

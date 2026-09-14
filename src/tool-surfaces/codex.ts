@@ -13,6 +13,7 @@ import {
 } from "./types.js";
 import {
   contentText,
+  logToolCall,
   resultOutputSchema,
   runLoggedToolOperation,
   textBlock,
@@ -35,8 +36,140 @@ export function registerCodexTools(context: ToolRegistrationContext): void {
 
 const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
   registerApplyPatchTool,
+  registerSemanticTools,
   registerCodexProcessTools,
 ];
+
+const semanticReadActionSchema = z.enum([
+  "overview",
+  "find",
+  "references",
+  "implementations",
+  "declaration",
+  "diagnostics",
+]);
+
+function registerSemanticTools(context: ToolRegistrationContext): void {
+  const { server, config, workspaces, semantic } = context;
+  if (!semantic?.available) return;
+
+  server.registerTool(
+    "semantic_code",
+    {
+      title: "Semantic code query",
+      description:
+        "Query source code with Serena/LSP semantics. Use overview for file structure, find for symbols, references or implementations for relations, declaration for a symbol at a code pattern, and diagnostics for language-server errors. Results are bounded; refine broad queries instead of reading entire files.",
+      inputSchema: {
+        workspaceId: z.string().describe(workspaceIdDescription),
+        action: semanticReadActionSchema,
+        path: z.string().describe("Workspace-relative source file or directory. Use an empty string only for a broad symbol find."),
+        symbol: z.string().optional().describe("Symbol/name-path for find, references, or implementations."),
+        pattern: z.string().optional().describe("Regex containing one capture group for declaration lookup."),
+        detail: z.enum(["location", "info", "body"]).optional().describe("Find/declaration detail. Defaults to location."),
+      },
+      outputSchema: resultOutputSchema({
+        action: semanticReadActionSchema,
+        truncated: z.boolean(),
+        backendAgeMs: z.number().nonnegative(),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspaceId, action, path: relativePath, symbol, pattern, detail }) => {
+      const startedAt = performance.now();
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      if (relativePath) workspaces.resolveReadPath(workspace, relativePath);
+      let tool: string;
+      let args: Record<string, unknown>;
+      if (action === "overview") {
+        tool = "get_symbols_overview";
+        args = { relative_path: relativePath, max_answer_chars: 6_000 };
+      } else if (action === "find") {
+        if (!symbol) throw new Error("semantic_code action=find requires symbol.");
+        tool = "find_symbol";
+        args = { name_path_pattern: symbol, relative_path: relativePath, include_body: detail === "body", include_info: detail === "info", max_answer_chars: 6_000 };
+      } else if (action === "references") {
+        if (!symbol || !relativePath) throw new Error("semantic_code action=references requires symbol and path.");
+        tool = "find_referencing_symbols";
+        args = { name_path: symbol, relative_path: relativePath, max_answer_chars: 6_000 };
+      } else if (action === "implementations") {
+        if (!symbol || !relativePath) throw new Error("semantic_code action=implementations requires symbol and path.");
+        tool = "find_implementations";
+        args = { name_path: symbol, relative_path: relativePath, include_info: detail === "info", max_answer_chars: 6_000 };
+      } else if (action === "declaration") {
+        if (!relativePath || !pattern) throw new Error("semantic_code action=declaration requires path and pattern.");
+        tool = "find_declaration";
+        args = { relative_path: relativePath, regex: pattern, include_body: detail === "body", include_info: detail === "info" };
+      } else {
+        if (!relativePath) throw new Error("semantic_code action=diagnostics requires path.");
+        tool = "get_diagnostics_for_file";
+        args = { relative_path: relativePath, max_answer_chars: 6_000 };
+      }
+      const response = await semantic.call(workspace.root, tool, args);
+      logToolCall(config, { tool: "semantic_code", workspaceId, path: relativePath, success: true, durationMs: Math.round(performance.now() - startedAt) });
+      return {
+        content: [textBlock(response.result)],
+        structuredContent: { result: response.result, action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
+      };
+    },
+  );
+
+  const semanticEditActionSchema = z.enum(["rename", "replace_body", "insert_before", "insert_after", "safe_delete"]);
+  server.registerTool(
+    "semantic_edit",
+    {
+      title: "Semantic code edit",
+      description:
+        "Perform an LSP-aware symbol edit through Serena when plain patching would be less reliable. Use rename for cross-file symbol renames; replace or insert actions target a symbol name-path; safe_delete removes a symbol only when semantic checks allow it. Call show_changes after the final edit.",
+      inputSchema: {
+        workspaceId: z.string().describe(workspaceIdDescription),
+        action: semanticEditActionSchema,
+        path: z.string().describe("Workspace-relative source file containing the target symbol."),
+        symbol: z.string().describe("Target symbol/name-path."),
+        newName: z.string().optional().describe("New symbol name for rename."),
+        body: z.string().optional().describe("Replacement or inserted code for replace_body/insert_before/insert_after."),
+      },
+      outputSchema: resultOutputSchema({
+        action: semanticEditActionSchema,
+        truncated: z.boolean(),
+        backendAgeMs: z.number().nonnegative(),
+      }),
+      annotations: EDIT_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, action, path: relativePath, symbol, newName, body }) => {
+      const startedAt = performance.now();
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      workspaces.resolveReadPath(workspace, relativePath);
+      let tool: string;
+      let args: Record<string, unknown>;
+      if (action === "rename") {
+        if (!newName) throw new Error("semantic_edit action=rename requires newName.");
+        tool = "rename_symbol";
+        args = { name_path: symbol, relative_path: relativePath, new_name: newName };
+      } else if (action === "replace_body") {
+        if (body === undefined) throw new Error("semantic_edit action=replace_body requires body.");
+        tool = "replace_symbol_body";
+        args = { name_path: symbol, relative_path: relativePath, body };
+      } else if (action === "insert_before") {
+        if (body === undefined) throw new Error("semantic_edit action=insert_before requires body.");
+        tool = "insert_before_symbol";
+        args = { name_path: symbol, relative_path: relativePath, body };
+      } else if (action === "insert_after") {
+        if (body === undefined) throw new Error("semantic_edit action=insert_after requires body.");
+        tool = "insert_after_symbol";
+        args = { name_path: symbol, relative_path: relativePath, body };
+      } else {
+        tool = "safe_delete_symbol";
+        args = { name_path_pattern: symbol, relative_path: relativePath };
+      }
+      const response = await semantic.call(workspace.root, tool, args);
+      logToolCall(config, { tool: "semantic_edit", workspaceId, path: relativePath, success: true, durationMs: Math.round(performance.now() - startedAt) });
+      return {
+        content: [textBlock(response.result)],
+        structuredContent: { result: response.result, action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
+      };
+    },
+  );
+}
 
 function recommendedPollMs(snapshot: Pick<ProcessSnapshot, "running" | "wallTimeMs" | "idleTimeMs">): number {
   if (!snapshot.running) return 0;

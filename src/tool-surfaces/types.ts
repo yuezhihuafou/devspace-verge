@@ -3,6 +3,7 @@ import type { DurableTaskManager } from "../durable-tasks.js";
 import type { ProcessSessionManager } from "../process-sessions.js";
 import type { ServerConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspaces.js";
+import type { SerenaSemanticManager } from "../serena-semantic.js";
 
 export const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 
@@ -80,6 +81,7 @@ export interface ToolRegistrationContext {
   workspaces: WorkspaceRegistry;
   processSessions: ProcessSessionManager;
   durableTasks?: DurableTaskManager;
+  semantic?: SerenaSemanticManager;
 }
 
 export interface ToolInstructionContext {

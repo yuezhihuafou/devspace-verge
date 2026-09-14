@@ -48,6 +48,7 @@ import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { SerenaSemanticManager } from "./serena-semantic.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
@@ -315,6 +316,7 @@ export function createMcpServer(
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
   durableTasks?: DurableTaskManager,
+  semantic?: SerenaSemanticManager,
 ): McpServer {
   const toolSurface = getToolSurface(config.toolMode);
   const server = new McpServer(
@@ -334,6 +336,7 @@ export function createMcpServer(
     incomingArtifactAdapters,
     trackToolActivity,
     durableTasks,
+    semantic,
   );
   return server;
 }
@@ -348,6 +351,7 @@ function registerMcpSurface(
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
   durableTasks?: DurableTaskManager,
+  semantic?: SerenaSemanticManager,
 ): void {
   const registrationTarget = trackToolActivity
     ? withTrackedToolHandlers(server, trackToolActivity)
@@ -713,6 +717,7 @@ function registerMcpSurface(
     workspaces,
     processSessions,
     durableTasks,
+    semantic,
   });
 
   registerAppTool(
@@ -836,6 +841,7 @@ export function createServer(
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
   const durableTasks = new DurableTaskManager();
+  const semantic = new SerenaSemanticManager();
   const toolActivities = new ToolActivityTracker();
   const localAgentProviders = buildLocalAgentProviderStatuses(
     config.subagents,
@@ -857,6 +863,7 @@ export function createServer(
       incomingArtifactAdapters,
       toolActivities.track,
       durableTasks,
+      semantic,
     );
   });
   const logMcpHandlerError = (error: Error) => logEvent(
@@ -994,6 +1001,7 @@ export function createServer(
         }
         await toolActivities.waitForIdle();
         processSessions.shutdown();
+        await semantic.close();
         oauthProvider.close();
         workspaceStore.close?.();
       })();
