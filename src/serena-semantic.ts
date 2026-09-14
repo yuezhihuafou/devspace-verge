@@ -1,11 +1,10 @@
-import { execFile, spawnSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { access, mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-
-const execFileAsync = promisify(execFile);
 
 interface SerenaClientLike {
   callTool(params: { name: string; arguments?: Record<string, unknown> }, resultSchema?: unknown, options?: { timeout?: number }): Promise<unknown>;
@@ -30,28 +29,53 @@ function textFromResult(result: unknown): string {
   return (value.content ?? []).filter((item) => item.type === "text" && typeof item.text === "string").map((item) => item.text).join("\n");
 }
 
-async function excludeLocalState(root: string): Promise<void> {
+async function managedSerenaHome(root: string): Promise<string> {
+  const digest = createHash("sha256").update(path.resolve(root)).digest("hex").slice(0, 20);
+  const base = process.env.XDG_DATA_HOME
+    ? path.join(process.env.XDG_DATA_HOME, "devspace", "serena", digest)
+    : path.join(homedir(), ".local", "share", "devspace", "serena", digest);
+  const projectData = path.join(base, "project-data");
+  await mkdir(projectData, { recursive: true, mode: 0o700 });
+  const configPath = path.join(base, "serena_config.yml");
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd: root, timeout: 2_000, windowsHide: true });
-    const excludePath = path.resolve(root, stdout.trim());
-    const current = await readFile(excludePath, "utf8").catch(() => "");
-    if (current.split(/\r?\n/).some((line) => line.trim() === ".serena/")) return;
-    await writeFile(excludePath, `${current}${current === "" || current.endsWith("\n") ? "" : "\n"}.serena/\n`, "utf8");
+    await access(configPath);
   } catch {
-    // Non-Git workspaces may keep Serena's local metadata in the workspace.
+    await writeFile(
+      configPath,
+      `projects: []\nproject_serena_folder_location: ${JSON.stringify(projectData)}\n`,
+      { mode: 0o600 },
+    );
   }
+  return base;
 }
 
 async function createClient(root: string): Promise<SerenaClientLike> {
-  await excludeLocalState(root);
+  const serenaHome = await managedSerenaHome(root);
   const transport = new StdioClientTransport({
     command: "serena",
     args: ["start-mcp-server", "--project", root, "--context", "codex", "--transport", "stdio", "--enable-web-dashboard", "false", "--open-web-dashboard", "false", "--enable-gui-log-window", "false", "--log-level", "ERROR"],
     cwd: root,
+    env: Object.fromEntries(
+      Object.entries({ ...process.env, SERENA_HOME: serenaHome }).filter((entry): entry is [string, string] => entry[1] !== undefined),
+    ),
     stderr: "pipe",
   });
   const client = new Client({ name: "devspace-serena-backend", version: "1" });
-  await client.connect(transport);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      client.connect(transport),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Serena MCP connect timeout")), 15_000);
+        timer.unref();
+      }),
+    ]);
+  } catch (error) {
+    await transport.close().catch(() => undefined);
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   return client;
 }
 
@@ -69,7 +93,8 @@ export class SerenaSemanticManager {
 
   async call(root: string, tool: string, args: Record<string, unknown>): Promise<{ result: string; truncated: boolean; backendAgeMs: number }> {
     if (!this.available) throw new Error("Serena semantic backend is not installed.");
-    const backend = await this.backend(root);
+    const key = path.resolve(root);
+    const backend = await this.backend(key);
     try {
       const response = await backend.client.callTool({ name: tool, arguments: args }, undefined, { timeout: this.timeoutMs });
       const raw = textFromResult(response);
@@ -79,6 +104,11 @@ export class SerenaSemanticManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/timeout/i.test(message)) throw new Error(`Serena semantic backend timed out after ${this.timeoutMs}ms; it may still be warming or indexing. Retry later or use DevSpace text tools meanwhile.`);
+      if (/(connection|transport|channel|stream).*(closed|ended|reset)|\bEOF\b|ECONNRESET|EPIPE|not connected/i.test(message)) {
+        this.clients.delete(key);
+        await backend.client.close().catch(() => undefined);
+        throw new Error("Serena semantic backend disconnected; the next semantic call will start a fresh backend.");
+      }
       throw error;
     }
   }
