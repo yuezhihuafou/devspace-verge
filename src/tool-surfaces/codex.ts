@@ -19,7 +19,11 @@ import {
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
+const CODEX_EXEC_YIELD_MS = 5_000;
+const CODEX_POLL_YIELD_MS = 5_000;
+const CODEX_INTERACTIVE_YIELD_MS = 250;
+
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Long-running commands return a running session after a short bounded wait; do not spin on long blocking polls when independent work is available. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -171,7 +175,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Execute command",
       description:
-        "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Full output is persisted locally; the MCP result is compact and includes a runId. Returns a sessionId when the process is still running. devspace-log commands are handled internally for bounded log retrieval.",
+        "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Full output is persisted locally; the MCP result is compact and includes a runId. Long-running commands return promptly with a sessionId instead of holding the tool call open. devspace-log commands are handled internally for bounded log retrieval.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -179,13 +183,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         columns: z.number().int().min(1).max(1_000).optional().describe("Initial PTY width. Defaults to 80."),
         rows: z.number().int().min(1).max(1_000).optional().describe("Initial PTY height. Defaults to 24."),
         workingDirectory: z.string().optional().describe("Working directory relative to the workspace root. Defaults to the workspace root."),
-        yieldTimeMs: z.number().int().min(0).max(30_000).optional().describe("Milliseconds to wait before returning a running session. Defaults to 10000."),
-        maxOutputTokens: z.number().int().positive().max(100_000).optional().describe("Approximate internal output token budget before compacting. Defaults to 10000."),
       },
       outputSchema: processOutputSchema(),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory, yieldTimeMs, maxOutputTokens }) => {
+    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }) => {
       await workspaces.getWorkspace(workspaceId);
       const runLogResult = await handleRunLogCommand(cmd);
       if (runLogResult !== null) return runLogToolResponse(cmd, runLogResult);
@@ -212,8 +214,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             tty,
             columns,
             rows,
-            yieldTimeMs,
-            maxOutputTokens,
+            yieldTimeMs: CODEX_EXEC_YIELD_MS,
           });
         },
       );
@@ -226,20 +227,18 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Write to process",
       description:
-        "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C. Full output remains in the same local run log.",
+        "Poll or write characters to a process returned by exec_command. Polls are short and bounded; if the process is still running, the tool returns its current status instead of blocking for a long interval. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C. Full output remains in the same local run log.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
         chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll."),
         columns: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this width."),
         rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
-        yieldTimeMs: z.number().int().min(0).max(30_000).optional().describe("Milliseconds to wait for process output or completion. Defaults to 10000."),
-        maxOutputTokens: z.number().int().positive().max(100_000).optional().describe("Approximate internal output token budget before compacting. Defaults to 10000."),
       },
       outputSchema: processOutputSchema(),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, sessionId, chars, columns, rows, yieldTimeMs, maxOutputTokens }) => {
+    async ({ workspaceId, sessionId, chars, columns, rows }) => {
       const startedAt = performance.now();
       const snapshot = await runLoggedToolOperation(
         config,
@@ -247,14 +246,14 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         startedAt,
         async () => {
           await workspaces.getWorkspace(workspaceId);
+          const interactionRequested = Boolean(chars?.length) || columns !== undefined || rows !== undefined;
           return processSessions.write({
             workspaceId,
             sessionId,
             chars,
             columns,
             rows,
-            yieldTimeMs,
-            maxOutputTokens,
+            yieldTimeMs: interactionRequested ? CODEX_INTERACTIVE_YIELD_MS : CODEX_POLL_YIELD_MS,
           });
         },
       );

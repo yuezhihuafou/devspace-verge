@@ -66,6 +66,19 @@ test("codex process failures expose MCP error state and exit code", async (t) =>
   assert.match(contentText(response), /expected-error/);
 });
 
+test("codex process tools keep wait and output budgets server-managed", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const tools = await context.client.listTools();
+
+  for (const name of ["exec_command", "write_stdin"]) {
+    const tool = tools.tools.find((candidate) => candidate.name === name);
+    assert.ok(tool, `${name} should be registered`);
+    const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    assert.equal("yieldTimeMs" in properties, false);
+    assert.equal("maxOutputTokens" in properties, false);
+  }
+});
+
 test("UI metadata is limited to workspace and aggregate review", async (t) => {
   for (const uiEnabled of [true, false]) {
     await t.test(uiEnabled ? "enabled" : "disabled", async (nested) => {

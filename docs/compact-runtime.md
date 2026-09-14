@@ -20,6 +20,13 @@ Long-running process sessions keep the same `runId` across `write_stdin` polls.
 The MCP-visible result stays bounded and includes status, exit code or running
 state, duration, output size, a preview, and the `runId`.
 
+On the Codex-compatible tool surface, command and poll wait budgets are managed
+by DevSpace instead of exposed as model-controlled arguments. A long command
+returns a running `sessionId` after a short bounded wait, and subsequent polls
+also return promptly if the process is still running. This avoids turning a
+healthy multi-minute local job into a single long-blocking MCP call while the
+full output continues to be persisted under the same `runId`.
+
 Additional output can be requested with:
 
 ```text
