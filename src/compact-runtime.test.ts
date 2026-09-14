@@ -21,6 +21,10 @@ try {
   assert.equal(await handleRunLogCommand(`devspace-log read ${success.runId} 2 1`), "beta");
   assert.equal(await handleRunLogCommand(`devspace-log tail ${success.runId} 1`), "gamma");
   assert.equal(await handleRunLogCommand(`devspace-log grep ${success.runId} beta`), "beta");
+  assert.equal(
+    await handleRunLogCommand(`devspace-log grep ${success.runId} 'beta|literal;quoted'`),
+    "(no matches for beta|literal;quoted)",
+  );
   await assert.rejects(
     () => handleRunLogCommand(`devspace-log meta ${success.runId}; echo should-not-run`),
     /cannot be chained with shell operators/,

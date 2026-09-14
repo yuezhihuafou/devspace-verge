@@ -15,6 +15,45 @@ function dayFromRunId(runId: string): string | undefined {
   return match ? `${match[1]}-${match[2]}-${match[3]}` : undefined;
 }
 
+function internalCommandParts(command: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  const push = () => {
+    if (current !== "") parts.push(current);
+    current = "";
+  };
+  for (const char of command.trim()) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      else current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === ";" || char === "|" || char === "&") {
+      throw new Error("devspace-log is an internal bounded log query and cannot be chained with shell operators");
+    }
+    if (/\s/.test(char)) push();
+    else current += char;
+  }
+  if (escaped || quote) throw new Error("devspace-log contains an unterminated quote or escape");
+  push();
+  return parts;
+}
+
 async function findRunDir(runId: string): Promise<string> {
   if (!RUN_RE.test(runId)) throw new Error("invalid runId");
   const root = runStoreRoot();
@@ -141,10 +180,7 @@ async function readBytes(filePath: string, offsetValue?: string, lengthValue?: s
 
 export async function handleRunLogCommand(command: string): Promise<string | null> {
   if (!command.trimStart().startsWith("devspace-log")) return null;
-  if (/[;&|]/.test(command)) {
-    throw new Error("devspace-log is an internal bounded log query and cannot be chained with shell operators");
-  }
-  const parts = command.trim().split(/\s+/);
+  const parts = internalCommandParts(command);
   if (parts[0] !== "devspace-log") return null;
   const action = parts[1];
   const runId = parts[2];
