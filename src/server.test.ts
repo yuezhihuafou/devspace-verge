@@ -32,7 +32,7 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "show_changes"],
+      expected: ["open_workspace", "read", "apply_patch", "exec_command", "process_status", "write_stdin", "show_changes"],
     },
   ];
 
@@ -70,7 +70,7 @@ test("codex process tools keep wait and output budgets server-managed", async (t
   const context = await fixture(t, { toolMode: "codex" });
   const tools = await context.client.listTools();
 
-  for (const name of ["exec_command", "write_stdin"]) {
+  for (const name of ["exec_command", "process_status", "write_stdin"]) {
     const tool = tools.tools.find((candidate) => candidate.name === name);
     assert.ok(tool, `${name} should be registered`);
     const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};

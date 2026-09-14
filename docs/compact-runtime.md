@@ -27,6 +27,13 @@ also return promptly if the process is still running. This avoids turning a
 healthy multi-minute local job into a single long-blocking MCP call while the
 full output continues to be persisted under the same `runId`.
 
+Long-running status checks use `process_status`. It is non-blocking and does not
+consume buffered process output. The response includes `idleTimeMs` and a
+server-managed `nextPollMs` hint that backs off from 5 seconds to 60 seconds as
+jobs run longer or remain idle. `write_stdin` remains available for actual
+process interaction, Ctrl-C, PTY resize, and compatibility output collection;
+an empty compatibility poll returns immediately.
+
 Additional output can be requested with:
 
 ```text

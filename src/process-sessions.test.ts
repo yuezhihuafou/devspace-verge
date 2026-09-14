@@ -86,6 +86,32 @@ assert.equal(completed.running, false);
 assert.equal(completed.exitCode, 0);
 assert.match(completed.output, /finished/);
 
+const statusTarget = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => console.log('status-output'), 30); setTimeout(() => process.exit(0), 120)"`,
+  yieldTimeMs: 5,
+});
+assert.equal(statusTarget.running, true);
+assert.ok(statusTarget.sessionId);
+await new Promise((resolve) => setTimeout(resolve, 60));
+const statusSnapshot = manager.status("workspace-a", statusTarget.sessionId);
+assert.equal(statusSnapshot.running, true);
+assert.equal(statusSnapshot.sessionId, statusTarget.sessionId);
+assert.ok(statusSnapshot.outputBytes > 0);
+assert.ok(statusSnapshot.outputLines > 0);
+const statusOutput = await manager.write({
+  workspaceId: "workspace-a",
+  sessionId: statusTarget.sessionId,
+  yieldTimeMs: 0,
+});
+assert.equal(statusOutput.running, true);
+assert.match(statusOutput.output, /status-output/);
+await new Promise((resolve) => setTimeout(resolve, 100));
+const completedStatus = manager.status("workspace-a", statusTarget.sessionId);
+assert.equal(completedStatus.running, false);
+assert.equal(completedStatus.exitCode, 0);
+
 const interactive = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),

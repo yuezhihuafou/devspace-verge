@@ -2,7 +2,7 @@ import * as z from "zod/v4";
 import { applyPatch } from "../apply-patch.js";
 import { handleRunLogCommand } from "../compact-runtime/run-log-access.js";
 import { compactPreview } from "../compact-runtime/output-policy.js";
-import type { ProcessSnapshot } from "../process-sessions.js";
+import type { ProcessSnapshot, ProcessStatusSnapshot } from "../process-sessions.js";
 import {
   EDIT_TOOL_ANNOTATIONS,
   SHELL_TOOL_ANNOTATIONS,
@@ -20,10 +20,9 @@ import {
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
 const CODEX_EXEC_YIELD_MS = 5_000;
-const CODEX_POLL_YIELD_MS = 5_000;
 const CODEX_INTERACTIVE_YIELD_MS = 250;
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Long-running commands return a running session after a short bounded wait; do not spin on long blocking polls when independent work is available. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, process_status for non-blocking checks of long-running processes, and write_stdin only for process interaction or compatibility output collection. Long-running commands return a running session after a short bounded wait. Respect nextPollMs, do independent work between checks when possible, and do not create tight polling loops. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -38,6 +37,15 @@ const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
   registerCodexProcessTools,
 ];
 
+function recommendedPollMs(snapshot: Pick<ProcessSnapshot, "running" | "wallTimeMs" | "idleTimeMs">): number {
+  if (!snapshot.running) return 0;
+  if (snapshot.idleTimeMs >= 120_000) return 60_000;
+  if (snapshot.wallTimeMs < 30_000) return 5_000;
+  if (snapshot.wallTimeMs < 120_000) return 15_000;
+  if (snapshot.wallTimeMs < 600_000) return 30_000;
+  return 60_000;
+}
+
 function processResult(snapshot: ProcessSnapshot): string {
   const isError = Boolean(snapshot.signal) || (!snapshot.running && (snapshot.exitCode ?? 0) !== 0);
   const status = snapshot.running
@@ -48,6 +56,9 @@ function processResult(snapshot: ProcessSnapshot): string {
   const lines = [
     `run=${snapshot.runId} status=${status} duration=${snapshot.wallTimeMs}ms output=${snapshot.outputLines}L/${snapshot.outputBytes}B`,
   ];
+  if (snapshot.running) {
+    lines[0] += ` idle=${snapshot.idleTimeMs}ms next_check>=${recommendedPollMs(snapshot)}ms`;
+  }
   const preview = compactPreview(snapshot.output, isError, snapshot.command);
   if (preview) lines.push(preview);
   if (snapshot.logError) {
@@ -70,6 +81,8 @@ function processOutputSchema(): z.ZodRawShape {
     exitCode: z.number().int().optional(),
     signal: z.string().optional(),
     wallTimeMs: z.number().nonnegative(),
+    idleTimeMs: z.number().nonnegative(),
+    nextPollMs: z.number().nonnegative(),
     outputBytes: z.number().nonnegative(),
     outputLines: z.number().nonnegative(),
     outputTruncated: z.boolean(),
@@ -91,6 +104,8 @@ function processToolResponse(snapshot: ProcessSnapshot) {
       exitCode: snapshot.exitCode,
       signal: snapshot.signal,
       wallTimeMs: snapshot.wallTimeMs,
+      idleTimeMs: snapshot.idleTimeMs,
+      nextPollMs: recommendedPollMs(snapshot),
       outputBytes: snapshot.outputBytes,
       outputLines: snapshot.outputLines,
       outputTruncated: snapshot.outputTruncated,
@@ -223,11 +238,80 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
   );
 
   server.registerTool(
+    "process_status",
+    {
+      title: "Check process status",
+      description:
+        "Check a long-running process without waiting and without consuming its buffered output. Returns current state, output counters, idle time, and a server-recommended nextPollMs. Prefer this over repeated write_stdin polling.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier used to start the process."),
+        sessionId: z.number().describe("Process session identifier returned by exec_command."),
+      },
+      outputSchema: resultOutputSchema({
+        sessionId: z.number(),
+        runId: z.string(),
+        running: z.boolean(),
+        exitCode: z.number().int().optional(),
+        signal: z.string().optional(),
+        wallTimeMs: z.number().nonnegative(),
+        idleTimeMs: z.number().nonnegative(),
+        outputBytes: z.number().nonnegative(),
+        outputLines: z.number().nonnegative(),
+        nextPollMs: z.number().nonnegative(),
+        logError: z.string().optional(),
+      }),
+      annotations: SHELL_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, sessionId }) => {
+      const startedAt = performance.now();
+      const status = await runLoggedToolOperation(
+        config,
+        { tool: "process_status", workspaceId },
+        startedAt,
+        async () => {
+          await workspaces.getWorkspace(workspaceId);
+          return processSessions.status(workspaceId, sessionId);
+        },
+      );
+      const nextPollMs = recommendedPollMs(status);
+      const state = status.running
+        ? "running"
+        : status.signal
+          ? `signal=${status.signal}`
+          : `exit=${status.exitCode ?? "unknown"}`;
+      const result = [
+        `run=${status.runId} status=${state} session=${status.sessionId} duration=${status.wallTimeMs}ms idle=${status.idleTimeMs}ms output=${status.outputLines}L/${status.outputBytes}B next_check>=${nextPollMs}ms`,
+        status.running
+          ? `result=pending; avoid tight polling; full output remains local under runId=${status.runId}`
+          : `result=ready; inspect with devspace-log tail ${status.runId} 80 or devspace-log read ${status.runId} 1 80`,
+      ];
+      if (status.logError) result.push(`warning=full local log persistence failed: ${status.logError}`);
+      return {
+        content: [textBlock(result.join("\n"))],
+        structuredContent: {
+          result: result.join("\n"),
+          sessionId: status.sessionId,
+          runId: status.runId,
+          running: status.running,
+          exitCode: status.exitCode,
+          signal: status.signal,
+          wallTimeMs: status.wallTimeMs,
+          idleTimeMs: status.idleTimeMs,
+          outputBytes: status.outputBytes,
+          outputLines: status.outputLines,
+          nextPollMs,
+          ...(status.logError ? { logError: status.logError } : {}),
+        },
+      };
+    },
+  );
+
+  server.registerTool(
     "write_stdin",
     {
       title: "Write to process",
       description:
-        "Poll or write characters to a process returned by exec_command. Polls are short and bounded; if the process is still running, the tool returns its current status instead of blocking for a long interval. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C. Full output remains in the same local run log.",
+        "Interact with a process returned by exec_command: send characters, resize a PTY, send Ctrl-C, or collect buffered output. Empty compatibility polls return immediately; use process_status for normal non-blocking status checks. Full output remains in the same local run log.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
@@ -253,7 +337,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             chars,
             columns,
             rows,
-            yieldTimeMs: interactionRequested ? CODEX_INTERACTIVE_YIELD_MS : CODEX_POLL_YIELD_MS,
+            yieldTimeMs: interactionRequested ? CODEX_INTERACTIVE_YIELD_MS : 0,
           });
         },
       );

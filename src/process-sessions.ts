@@ -48,6 +48,21 @@ export interface ProcessSnapshot {
   signal?: string;
   logError?: string;
   wallTimeMs: number;
+  idleTimeMs: number;
+}
+
+export interface ProcessStatusSnapshot {
+  sessionId: number;
+  runId: string;
+  command: string;
+  outputBytes: number;
+  outputLines: number;
+  running: boolean;
+  exitCode?: number;
+  signal?: string;
+  logError?: string;
+  wallTimeMs: number;
+  idleTimeMs: number;
 }
 
 interface ManagedProcess {
@@ -62,6 +77,7 @@ interface ProcessSession {
   command: string;
   process?: ManagedProcess;
   startedAt: number;
+  lastActivityAt: number;
   columns: number;
   rows: number;
   buffer: HeadTailBuffer;
@@ -272,6 +288,25 @@ export class ProcessSessionManager {
     return snapshot;
   }
 
+  status(workspaceId: string, sessionId: number): ProcessStatusSnapshot {
+    const session = this.getOwnedSession(workspaceId, sessionId);
+    const run = session.runLogger.snapshot();
+    const now = Date.now();
+    return {
+      sessionId: session.id,
+      runId: run.runId,
+      command: session.command,
+      outputBytes: run.outputBytes,
+      outputLines: run.outputLines,
+      running: session.running,
+      exitCode: session.exitCode,
+      signal: session.signal,
+      logError: run.logError,
+      wallTimeMs: now - session.startedAt,
+      idleTimeMs: now - session.lastActivityAt,
+    };
+  }
+
   terminate(workspaceId: string, sessionId: number): void {
     const session = this.getOwnedSession(workspaceId, sessionId);
     if (session.running) session.process?.kill("SIGTERM");
@@ -317,6 +352,7 @@ export class ProcessSessionManager {
       workspaceId: input.workspaceId,
       command: input.command,
       startedAt,
+      lastActivityAt: startedAt,
       columns: terminalSize(input.columns, DEFAULT_COLUMNS),
       rows: terminalSize(input.rows, DEFAULT_ROWS),
       buffer: new HeadTailBuffer(this.maxBufferCharacters),
@@ -391,6 +427,7 @@ export class ProcessSessionManager {
   }
 
   private append(session: ProcessSession, output: string): void {
+    if (output) session.lastActivityAt = Date.now();
     session.runLogger.append(output);
     session.buffer.append(output);
   }
@@ -413,6 +450,7 @@ export class ProcessSessionManager {
       signal: session.signal,
       logError: run.logError,
       wallTimeMs: Date.now() - session.startedAt,
+      idleTimeMs: Date.now() - session.lastActivityAt,
     };
   }
 
