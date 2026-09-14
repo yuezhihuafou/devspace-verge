@@ -446,6 +446,7 @@ export class DurableTaskManager {
   }
 
   private async runnerIsAlive(state: DurableTaskState): Promise<boolean> {
+    let unitKnownInactive = false;
     if (!this.launchOverride && state.unitName && systemdUserAvailable()) {
       try {
         const { stdout } = await execFileAsync(
@@ -454,9 +455,13 @@ export class DurableTaskManager {
           { timeout: 1_500, windowsHide: true },
         );
         const activeState = stdout.trim();
-        return activeState === "active" || activeState === "activating" || activeState === "reloading" || activeState === "deactivating";
+        if (activeState === "active" || activeState === "activating" || activeState === "reloading" || activeState === "deactivating") {
+          return true;
+        }
+        unitKnownInactive = true;
       } catch {
-        return false;
+        // A user-manager restart or transient systemctl failure is not proof
+        // that the runner died. Fall through to the runner PID/heartbeat.
       }
     }
 
@@ -469,6 +474,8 @@ export class DurableTaskManager {
         return false;
       }
     }
+
+    if (unitKnownInactive) return false;
 
     const updatedAt = Date.parse(state.lastUpdatedAt);
     return !Number.isFinite(updatedAt) || Date.now() - updatedAt <= TASK_HEARTBEAT_STALE_MS;
