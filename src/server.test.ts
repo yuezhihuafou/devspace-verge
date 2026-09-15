@@ -112,6 +112,13 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
     0,
   );
   assert.ok(totalBytes <= 14_500, `Codex+Serena tool schema grew to ${totalBytes} bytes`);
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const semanticResponse = await context.client.callTool({
+    name: "semantic_code",
+    arguments: { workspaceId: opened.workspaceId, action: "find", path: "", symbol: "Example" },
+  });
+  assert.equal(contentText(semanticResponse), "ok");
+  assert.equal(structuredContent(semanticResponse).result, "ok");
   await semantic.close();
 });
 
@@ -126,6 +133,7 @@ test("codex common command responses stay compact and keep retrieval handles", a
   assert.equal(structured.exitCode, 0);
   assert.equal(typeof structured.runId, "string");
   assert.equal(structured.taskId, undefined);
+  assert.equal(structured.result, contentText(response));
   assert.doesNotMatch(contentText(response), /devspace-log (?:meta|read|grep|tail)/);
   const bytes = Buffer.byteLength(JSON.stringify(response), "utf8");
   assert.ok(bytes <= 500, `Common exec response grew to ${bytes} bytes`);

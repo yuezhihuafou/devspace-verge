@@ -108,7 +108,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       logToolCall(config, { tool: "semantic_code", workspaceId, path: relativePath, success: true, durationMs: Math.round(performance.now() - startedAt) });
       return {
         content: [textBlock(response.result)],
-        structuredContent: { action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
+        structuredContent: { result: response.result, action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
       };
     },
   );
@@ -160,7 +160,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       logToolCall(config, { tool: "semantic_edit", workspaceId, path: relativePath, success: true, durationMs: Math.round(performance.now() - startedAt) });
       return {
         content: [textBlock(response.result)],
-        structuredContent: { action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
+        structuredContent: { result: response.result, action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
       };
     },
   );
@@ -213,6 +213,7 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
     content,
     isError: processIsError(snapshot),
     structuredContent: {
+      result,
       resultType,
       sessionId: snapshot.sessionId,
       ...(isTask ? {
@@ -254,6 +255,7 @@ function taskViewResponse(view: DurableTaskView) {
     content: [textBlock(result)],
     isError: view.status === "failed",
     structuredContent: {
+      result,
       resultType: "complete" as const,
       taskId: view.taskId,
       status: view.status,
@@ -275,6 +277,7 @@ function runLogToolResponse(command: string, result: string) {
   return {
     content: [textBlock(result)],
     structuredContent: {
+      result,
       resultType: "complete" as const,
       runId,
       running: false,
@@ -319,6 +322,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
       return {
         content,
         structuredContent: {
+          result,
           additions: applied.additions,
           removals: applied.removals,
           files: applied.files,
@@ -435,7 +439,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const workspace = await workspaces.getWorkspace(workspaceId);
       await durableTasks.update(workspace.root, taskId, inputResponses);
       const result = `Accepted task input for ${taskId}.`;
-      return { content: [textBlock(result)], structuredContent: { resultType: "complete" as const } };
+      return { content: [textBlock(result)], structuredContent: { result, resultType: "complete" as const } };
     },
   );
 
@@ -456,7 +460,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const workspace = await workspaces.getWorkspace(workspaceId);
       await durableTasks.cancel(workspace.root, taskId);
       const result = `Cancellation requested for ${taskId}.`;
-      return { content: [textBlock(result)], structuredContent: { resultType: "complete" as const } };
+      return { content: [textBlock(result)], structuredContent: { result, resultType: "complete" as const } };
     },
   );
 
@@ -493,9 +497,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         `run=${status.runId} status=${state} session=${status.sessionId} duration=${status.wallTimeMs}ms idle=${status.idleTimeMs}ms output=${status.outputLines}L/${status.outputBytes}B next_check>=${nextPollMs}ms`,
       ];
       if (status.logError) result.push(`warning=full local log persistence failed: ${status.logError}`);
+      const resultText = result.join("\n");
       return {
-        content: [textBlock(result.join("\n"))],
+        content: [textBlock(resultText)],
         structuredContent: {
+          result: resultText,
           sessionId: status.sessionId,
           runId: status.runId,
           running: status.running,
