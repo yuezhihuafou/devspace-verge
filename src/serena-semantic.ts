@@ -15,6 +15,7 @@ export interface SerenaSemanticManagerOptions {
   available?: boolean;
   createClient?: (root: string) => Promise<SerenaClientLike>;
   timeoutMs?: number;
+  maxBackends?: number;
 }
 
 function installed(): boolean {
@@ -82,20 +83,25 @@ async function createClient(root: string): Promise<SerenaClientLike> {
 export class SerenaSemanticManager {
   readonly available: boolean;
   private readonly clients = new Map<string, Promise<{ client: SerenaClientLike; startedAt: number }>>();
+  private readonly busy = new Map<string, number>();
   private readonly factory: (root: string) => Promise<SerenaClientLike>;
   private readonly timeoutMs: number;
+  private readonly maxBackends: number;
 
   constructor(options: SerenaSemanticManagerOptions = {}) {
     this.available = options.available ?? installed();
     this.factory = options.createClient ?? createClient;
     this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.maxBackends = Math.max(1, options.maxBackends ?? 4);
   }
 
   async call(root: string, tool: string, args: Record<string, unknown>): Promise<{ result: string; truncated: boolean; backendAgeMs: number }> {
     if (!this.available) throw new Error("Serena semantic backend is not installed.");
     const key = path.resolve(root);
-    const backend = await this.backend(key);
+    this.busy.set(key, (this.busy.get(key) ?? 0) + 1);
+    let backend: { client: SerenaClientLike; startedAt: number } | undefined;
     try {
+      backend = await this.backend(key);
       const response = await backend.client.callTool({ name: tool, arguments: args }, undefined, { timeout: this.timeoutMs });
       const raw = textFromResult(response);
       const truncated = raw.length > 8_000;
@@ -106,25 +112,54 @@ export class SerenaSemanticManager {
       if (/timeout/i.test(message)) throw new Error(`Serena semantic backend timed out after ${this.timeoutMs}ms; it may still be warming or indexing. Retry later or use DevSpace text tools meanwhile.`);
       if (/(connection|transport|channel|stream).*(closed|ended|reset)|\bEOF\b|ECONNRESET|EPIPE|not connected/i.test(message)) {
         this.clients.delete(key);
-        await backend.client.close().catch(() => undefined);
+        await backend?.client.close().catch(() => undefined);
         throw new Error("Serena semantic backend disconnected; the next semantic call will start a fresh backend.");
       }
       throw error;
+    } finally {
+      const remaining = (this.busy.get(key) ?? 1) - 1;
+      if (remaining > 0) this.busy.set(key, remaining);
+      else this.busy.delete(key);
+      await this.trimBackends();
     }
   }
 
   async close(): Promise<void> {
     const clients = await Promise.allSettled(this.clients.values());
     this.clients.clear();
+    this.busy.clear();
     await Promise.allSettled(clients.filter((item): item is PromiseFulfilledResult<{ client: SerenaClientLike; startedAt: number }> => item.status === "fulfilled").map((item) => item.value.client.close()));
   }
 
-  private backend(root: string): Promise<{ client: SerenaClientLike; startedAt: number }> {
+  private async backend(root: string): Promise<{ client: SerenaClientLike; startedAt: number }> {
     const key = path.resolve(root);
     const existing = this.clients.get(key);
-    if (existing) return existing;
+    if (existing) {
+      this.clients.delete(key);
+      this.clients.set(key, existing);
+      return existing;
+    }
     const created = this.factory(key).then((client) => ({ client, startedAt: Date.now() })).catch((error) => { this.clients.delete(key); throw error; });
     this.clients.set(key, created);
+    await this.trimBackends();
     return created;
+  }
+
+  private async trimBackends(): Promise<void> {
+    while (this.clients.size > this.maxBackends) {
+      let candidate: string | undefined;
+      for (const key of this.clients.keys()) {
+        if ((this.busy.get(key) ?? 0) === 0) {
+          candidate = key;
+          break;
+        }
+      }
+      if (!candidate) return;
+      const backend = this.clients.get(candidate);
+      this.clients.delete(candidate);
+      if (!backend) continue;
+      const settled = await backend.then((value) => value).catch(() => undefined);
+      await settled?.client.close().catch(() => undefined);
+    }
   }
 }

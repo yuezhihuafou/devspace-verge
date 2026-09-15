@@ -10,6 +10,37 @@ const MAX_MATCHES = 200;
 const MAX_RETURN_CHARS = 20_000;
 const MAX_BYTE_READ = 32 * 1024;
 
+const COMPACT_META_KEYS = [
+  "schemaVersion",
+  "runId",
+  "taskId",
+  "status",
+  "statusMessage",
+  "running",
+  "stale",
+  "createdAt",
+  "startedAt",
+  "lastUpdatedAt",
+  "lastActivityAt",
+  "finishedAt",
+  "durationMs",
+  "isError",
+  "exitCode",
+  "signal",
+  "outputBytes",
+  "outputLines",
+  "outputTruncated",
+  "logError",
+] as const;
+
+function compactMeta(value: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key of COMPACT_META_KEYS) {
+    if (value[key] !== undefined) result[key] = value[key];
+  }
+  return result;
+}
+
 function dayFromRunId(runId: string): string | undefined {
   const match = /^run_(\d{4})(\d{2})(\d{2})\d{6}_[A-Za-z0-9_]+$/.exec(runId);
   return match ? `${match[1]}-${match[2]}-${match[3]}` : undefined;
@@ -185,27 +216,37 @@ export async function handleRunLogCommand(command: string): Promise<string | nul
   const action = parts[1];
   const runId = parts[2];
   if (!action || !runId) {
-    throw new Error("usage: devspace-log read|tail|grep|bytes|meta <runId> ...");
+    throw new Error("usage: devspace-log read|tail|grep|bytes|meta|meta-full <runId> ...");
   }
   const runDir = await findRunDir(runId);
   const outputPath = path.join(runDir, "output.log");
 
-  if (action === "meta") {
+  if (action === "meta" || action === "meta-full") {
+    const full = action === "meta-full";
     try {
-      return (await readFile(path.join(runDir, "meta.json"), "utf8")).trimEnd();
+      const raw = (await readFile(path.join(runDir, "meta.json"), "utf8")).trimEnd();
+      if (full) return raw;
+      return JSON.stringify(compactMeta(JSON.parse(raw) as Record<string, unknown>), null, 2);
     } catch {
       try {
         const task = JSON.parse(await readFile(path.join(runDir, "task.json"), "utf8")) as Record<string, unknown>;
         const status = typeof task.status === "string" ? task.status : "unknown";
-        const updatedAt = typeof task.updatedAt === "string" ? Date.parse(task.updatedAt) : Number.NaN;
-        const stale = (status === "starting" || status === "running")
+        const updatedAtValue = typeof task.lastUpdatedAt === "string"
+          ? task.lastUpdatedAt
+          : typeof task.updatedAt === "string"
+            ? task.updatedAt
+            : undefined;
+        const updatedAt = updatedAtValue ? Date.parse(updatedAtValue) : Number.NaN;
+        const active = status === "starting" || status === "running" || status === "working";
+        const stale = active
           && Number.isFinite(updatedAt)
           && Date.now() - updatedAt > 60_000;
-        return JSON.stringify({
+        const enriched = {
           ...task,
-          running: !stale && (status === "starting" || status === "running"),
+          running: !stale && active,
           ...(stale ? { stale: true, status: "unknown" } : {}),
-        }, null, 2);
+        };
+        return JSON.stringify(full ? enriched : compactMeta(enriched), null, 2);
       } catch {
         const info = await stat(outputPath);
         return JSON.stringify({

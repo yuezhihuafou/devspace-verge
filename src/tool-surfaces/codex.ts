@@ -14,7 +14,6 @@ import {
 import {
   contentText,
   logToolCall,
-  resultOutputSchema,
   runLoggedToolOperation,
   textBlock,
 } from "./shared.js";
@@ -30,7 +29,7 @@ function execYieldMs(command: string): number {
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, and exec_command for inspection, tests, builds, and other commands. Non-interactive long-running commands return a durable taskId and runId without keeping the MCP call open and continue across DevSpace restarts. Use task_get for durable task state, task_update only when a task reports input_required, and task_cancel to request cancellation. Honor pollIntervalMs and do not create tight polling loops. process_status and write_stdin are only for interactive or compatibility process sessions that returned a sessionId. Commands run with the local user's authority and are not sandboxed; workspace validation only selects their initial working directory. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Long non-interactive commands return durable taskId/runId handles and survive DevSpace restarts; use task_get, task_update only for input_required, and task_cancel. Honor pollIntervalMs. Retrieve saved output with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive/TTY commands return sessionId; use process_status/write_stdin. Commands run with the local user's authority and are not sandboxed. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -73,11 +72,6 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
         pattern: z.string().optional().describe("Regex containing one capture group for declaration lookup."),
         detail: z.enum(["location", "info", "body"]).optional().describe("Find/declaration detail. Defaults to location."),
       },
-      outputSchema: resultOutputSchema({
-        action: semanticReadActionSchema,
-        truncated: z.boolean(),
-        backendAgeMs: z.number().nonnegative(),
-      }),
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, action, path: relativePath, symbol, pattern, detail }) => {
@@ -114,7 +108,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       logToolCall(config, { tool: "semantic_code", workspaceId, path: relativePath, success: true, durationMs: Math.round(performance.now() - startedAt) });
       return {
         content: [textBlock(response.result)],
-        structuredContent: { result: response.result, action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
+        structuredContent: { action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
       };
     },
   );
@@ -134,11 +128,6 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
         newName: z.string().optional().describe("New symbol name for rename."),
         body: z.string().optional().describe("Replacement or inserted code for replace_body/insert_before/insert_after."),
       },
-      outputSchema: resultOutputSchema({
-        action: semanticEditActionSchema,
-        truncated: z.boolean(),
-        backendAgeMs: z.number().nonnegative(),
-      }),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, action, path: relativePath, symbol, newName, body }) => {
@@ -171,7 +160,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       logToolCall(config, { tool: "semantic_edit", workspaceId, path: relativePath, success: true, durationMs: Math.round(performance.now() - startedAt) });
       return {
         content: [textBlock(response.result)],
-        structuredContent: { result: response.result, action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
+        structuredContent: { action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
       };
     },
   );
@@ -206,38 +195,13 @@ function processResult(snapshot: ProcessSnapshot): string {
   if (snapshot.logError) {
     lines.push(`log=unavailable; warning=full local log persistence failed: ${snapshot.logError}`);
   } else {
-    lines.push(`log=${snapshot.runId}; status=devspace-log meta ${snapshot.runId}; more=devspace-log read ${snapshot.runId} 1 80; search=devspace-log grep ${snapshot.runId} <pattern>`);
+    lines.push(`log=${snapshot.runId}`);
   }
   return lines.join("\n");
 }
 
 function processIsError(snapshot: ProcessSnapshot): boolean {
   return Boolean(snapshot.signal) || (!snapshot.running && (snapshot.exitCode ?? 0) !== 0);
-}
-
-function processOutputSchema(): z.ZodRawShape {
-  return resultOutputSchema({
-    resultType: z.enum(["task", "complete"]),
-    sessionId: z.number().optional(),
-    taskId: z.string().optional(),
-    status: taskStatusSchema.optional(),
-    statusMessage: z.string().optional(),
-    createdAt: z.string().optional(),
-    lastUpdatedAt: z.string().optional(),
-    ttlMs: z.number().int().nonnegative().nullable().optional(),
-    pollIntervalMs: z.number().int().nonnegative().optional(),
-    runId: z.string(),
-    running: z.boolean(),
-    exitCode: z.number().int().optional(),
-    signal: z.string().optional(),
-    wallTimeMs: z.number().nonnegative(),
-    idleTimeMs: z.number().nonnegative().optional(),
-    nextPollMs: z.number().nonnegative().optional(),
-    outputBytes: z.number().nonnegative(),
-    outputLines: z.number().nonnegative(),
-    outputTruncated: z.boolean(),
-    logError: z.string().optional(),
-  });
 }
 
 function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) {
@@ -249,7 +213,6 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
     content,
     isError: processIsError(snapshot),
     structuredContent: {
-      result,
       resultType,
       sessionId: snapshot.sessionId,
       ...(isTask ? {
@@ -278,25 +241,6 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
   };
 }
 
-const taskStatusSchema = z.enum(["working", "input_required", "completed", "cancelled", "failed"]);
-
-function taskViewSchema(): z.ZodRawShape {
-  return resultOutputSchema({
-    resultType: z.literal("complete"),
-    taskId: z.string(),
-    status: taskStatusSchema,
-    statusMessage: z.string().optional(),
-    createdAt: z.string(),
-    lastUpdatedAt: z.string(),
-    ttlMs: z.number().int().nonnegative().nullable(),
-    pollIntervalMs: z.number().int().nonnegative().optional(),
-    inputRequests: z.record(z.string(), z.unknown()).optional(),
-    taskResult: z.record(z.string(), z.unknown()).optional(),
-    error: z.record(z.string(), z.unknown()).optional(),
-    runId: z.string(),
-  });
-}
-
 function taskViewResponse(view: DurableTaskView) {
   const state = view.status === "completed"
     ? `completed${view.result?.isError ? " isError=true" : ""}`
@@ -304,19 +248,12 @@ function taskViewResponse(view: DurableTaskView) {
   const result = [
     `task=${view.taskId} status=${state} run=${view.runId} poll=${view.pollIntervalMs ?? 0}ms`,
     view.statusMessage,
-    view.status === "completed"
-      ? `result=ready; inspect with devspace-log tail ${view.runId} 80 or devspace-log read ${view.runId} 1 80`
-      : view.status === "input_required"
-        ? "result=input_required; answer outstanding inputRequests with task_update"
-        : view.status === "working"
-          ? "result=pending"
-          : undefined,
+    view.status === "input_required" ? "Use task_update for outstanding inputRequests." : undefined,
   ].filter(Boolean).join("\n");
   return {
     content: [textBlock(result)],
     isError: view.status === "failed",
     structuredContent: {
-      result,
       resultType: "complete" as const,
       taskId: view.taskId,
       status: view.status,
@@ -338,7 +275,6 @@ function runLogToolResponse(command: string, result: string) {
   return {
     content: [textBlock(result)],
     structuredContent: {
-      result,
       resultType: "complete" as const,
       runId,
       running: false,
@@ -364,17 +300,6 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
         workspaceId: z.string().describe(workspaceIdDescription),
         patch: z.string().describe("Patch text enclosed by *** Begin Patch and *** End Patch markers."),
       },
-      outputSchema: resultOutputSchema({
-        additions: z.number(),
-        removals: z.number(),
-        files: z.array(
-          z.object({
-            path: z.string(),
-            previousPath: z.string().optional(),
-            operation: z.enum(["add", "update", "delete", "move"]),
-          }),
-        ),
-      }),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, patch }) => {
@@ -394,7 +319,6 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
       return {
         content,
         structuredContent: {
-          result,
           additions: applied.additions,
           removals: applied.removals,
           files: applied.files,
@@ -412,7 +336,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Execute command",
       description:
-        "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Full output is persisted locally. Non-interactive long-running commands use durable execution and return a taskId plus runId; query them with task_get. Interactive/TTY commands use process sessions. devspace-log commands are handled internally for bounded log retrieval.",
+        "Run a shell command in a workspace. Not sandboxed. Full output is saved locally. Long non-TTY commands become durable tasks; TTY commands return a process session. devspace-log reads saved output.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -421,7 +345,6 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         rows: z.number().int().min(1).max(1_000).optional().describe("Initial PTY height. Defaults to 24."),
         workingDirectory: z.string().optional().describe("Working directory relative to the workspace root. Defaults to the workspace root."),
       },
-      outputSchema: processOutputSchema(),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }) => {
@@ -480,12 +403,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Get durable task",
       description:
-        "Get one durable task without waiting. This is the compatibility equivalent of MCP Tasks tasks/get while the host does not advertise io.modelcontextprotocol/tasks. Honor pollIntervalMs before checking a working task again.",
+        "Get one durable task without waiting. Honor pollIntervalMs before checking a working task again.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
       },
-      outputSchema: taskViewSchema(),
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, taskId }) => {
@@ -500,13 +422,12 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Update durable task",
       description:
-        "Provide responses requested by a durable task in input_required state. Compatibility equivalent of MCP Tasks tasks/update. Do not use for ordinary progress polling.",
+        "Provide requested input to a durable task in input_required state. Do not use for polling.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
         inputResponses: z.record(z.string(), z.unknown()).describe("Responses keyed by outstanding inputRequest identifiers."),
       },
-      outputSchema: resultOutputSchema({ resultType: z.literal("complete") }),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, taskId, inputResponses }) => {
@@ -514,7 +435,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const workspace = await workspaces.getWorkspace(workspaceId);
       await durableTasks.update(workspace.root, taskId, inputResponses);
       const result = `Accepted task input for ${taskId}.`;
-      return { content: [textBlock(result)], structuredContent: { result, resultType: "complete" as const } };
+      return { content: [textBlock(result)], structuredContent: { resultType: "complete" as const } };
     },
   );
 
@@ -523,12 +444,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Cancel durable task",
       description:
-        "Request cancellation of one durable task. Compatibility equivalent of MCP Tasks tasks/cancel. Cancellation is cooperative; use task_get only if the resulting terminal state matters to subsequent work.",
+        "Request cancellation of one durable task. Use task_get only if the terminal state matters to later work.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
       },
-      outputSchema: resultOutputSchema({ resultType: z.literal("complete") }),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, taskId }) => {
@@ -536,7 +456,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const workspace = await workspaces.getWorkspace(workspaceId);
       await durableTasks.cancel(workspace.root, taskId);
       const result = `Cancellation requested for ${taskId}.`;
-      return { content: [textBlock(result)], structuredContent: { result, resultType: "complete" as const } };
+      return { content: [textBlock(result)], structuredContent: { resultType: "complete" as const } };
     },
   );
 
@@ -545,24 +465,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Check process status",
       description:
-        "Check an interactive or compatibility process session without waiting and without consuming its buffered output. Use this only when exec_command returned a sessionId. Durable non-interactive commands return a runId instead; check those with devspace-log meta <runId>.",
+        "Check a process session immediately without consuming buffered output. Use only when exec_command returned sessionId.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
       },
-      outputSchema: resultOutputSchema({
-        sessionId: z.number(),
-        runId: z.string(),
-        running: z.boolean(),
-        exitCode: z.number().int().optional(),
-        signal: z.string().optional(),
-        wallTimeMs: z.number().nonnegative(),
-        idleTimeMs: z.number().nonnegative(),
-        outputBytes: z.number().nonnegative(),
-        outputLines: z.number().nonnegative(),
-        nextPollMs: z.number().nonnegative(),
-        logError: z.string().optional(),
-      }),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, sessionId }) => {
@@ -584,15 +491,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           : `exit=${status.exitCode ?? "unknown"}`;
       const result = [
         `run=${status.runId} status=${state} session=${status.sessionId} duration=${status.wallTimeMs}ms idle=${status.idleTimeMs}ms output=${status.outputLines}L/${status.outputBytes}B next_check>=${nextPollMs}ms`,
-        status.running
-          ? `result=pending; avoid tight polling; full output remains local under runId=${status.runId}`
-          : `result=ready; inspect with devspace-log tail ${status.runId} 80 or devspace-log read ${status.runId} 1 80`,
       ];
       if (status.logError) result.push(`warning=full local log persistence failed: ${status.logError}`);
       return {
         content: [textBlock(result.join("\n"))],
         structuredContent: {
-          result: result.join("\n"),
           sessionId: status.sessionId,
           runId: status.runId,
           running: status.running,
@@ -614,7 +517,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Write to process",
       description:
-        "Interact with a process returned by exec_command: send characters, resize a PTY, send Ctrl-C, or collect buffered output. Empty compatibility polls return immediately; use process_status for normal non-blocking status checks. Full output remains in the same local run log.",
+        "Interact with a process session: send characters/Ctrl-C, resize its PTY, or collect buffered output. Use process_status for status-only checks.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
@@ -622,7 +525,6 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         columns: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this width."),
         rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
       },
-      outputSchema: processOutputSchema(),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, sessionId, chars, columns, rows }) => {

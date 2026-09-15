@@ -39,7 +39,8 @@ try {
   const noisyMeta = JSON.parse(await handleRunLogCommand(`devspace-log meta ${noisy.runId}`) as string);
   assert.equal(noisyMeta.exitCode, 0);
   assert.equal(noisyMeta.outputBytes, 120_000);
-  assert.equal((await readFile(noisyMeta.outputPath)).length, 120_000);
+  const noisyFullMeta = JSON.parse(await handleRunLogCommand(`devspace-log meta-full ${noisy.runId}`) as string);
+  assert.equal((await readFile(noisyFullMeta.outputPath)).length, 120_000);
 
   const background = await manager.start({
     workspaceId: "workspace-a",

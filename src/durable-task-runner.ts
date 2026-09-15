@@ -6,6 +6,8 @@ import { resolveShellCommand } from "./process-platform.js";
 import { pruneRunStore } from "./compact-runtime/retention.js";
 import type { DurableTaskState, DurableTaskStatus } from "./durable-task-model.js";
 
+const TASK_HEARTBEAT_MS = 5_000;
+
 export interface DurableTaskRequest {
   schemaVersion: 2;
   taskId: string;
@@ -160,7 +162,7 @@ export async function runDurableTask(requestPath: string): Promise<number> {
 
     const heartbeat = setInterval(() => {
       void state("working").catch(() => undefined);
-    }, 2_000);
+    }, TASK_HEARTBEAT_MS);
     heartbeat.unref();
 
     const result = await completion;

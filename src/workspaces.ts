@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Stats } from "node:fs";
 import { Result, type Result as BetterResult } from "better-result";
 import type {
@@ -97,9 +97,11 @@ type DirectoryOps = {
 };
 
 const MAX_CACHED_WORKSPACES = 32;
+const MAX_CONVERSATION_INSTRUCTION_SCOPES = 128;
 
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
+  private readonly conversationInstructionFingerprints = new Map<string, Set<string>>();
   private readonly pendingCheckoutOpens = new Map<string, Promise<WorkspaceContext>>();
   private readonly pendingRestores = new Map<
     string,
@@ -110,6 +112,51 @@ export class WorkspaceRegistry {
     private readonly config: ServerConfig,
     private readonly store?: WorkspaceStore,
   ) {}
+
+  dedupeConversationAgentsFiles(
+    conversationScopeId: string | undefined,
+    workspaceRoot: string,
+    files: LoadedAgentsFile[],
+  ): { files: LoadedAgentsFile[]; reusedPaths: string[] } {
+    if (!conversationScopeId) return { files, reusedPaths: [] };
+    let seen = this.conversationInstructionFingerprints.get(conversationScopeId);
+    if (!seen) {
+      seen = new Set<string>();
+      this.conversationInstructionFingerprints.set(conversationScopeId, seen);
+      while (this.conversationInstructionFingerprints.size > MAX_CONVERSATION_INSTRUCTION_SCOPES) {
+        const oldest = this.conversationInstructionFingerprints.keys().next().value as string | undefined;
+        if (!oldest) break;
+        this.conversationInstructionFingerprints.delete(oldest);
+      }
+    } else {
+      this.conversationInstructionFingerprints.delete(conversationScopeId);
+      this.conversationInstructionFingerprints.set(conversationScopeId, seen);
+    }
+
+    const fresh: LoadedAgentsFile[] = [];
+    const reusedPaths: string[] = [];
+    for (const file of files) {
+      if (!isPathInsideRoot(file.path, workspaceRoot)) {
+        // External/global instructions are not recoverable through workspace
+        // read, so keep them self-contained in every workspace response.
+        fresh.push(file);
+        continue;
+      }
+      const logicalPath = relative(workspaceRoot, file.path).split(sep).join("/");
+      const fingerprint = createHash("sha256")
+        .update(logicalPath)
+        .update("\0")
+        .update(file.content)
+        .digest("hex");
+      if (seen.has(fingerprint)) {
+        reusedPaths.push(logicalPath);
+        continue;
+      }
+      seen.add(fingerprint);
+      fresh.push(file);
+    }
+    return { files: fresh, reusedPaths };
+  }
 
   async openWorkspace(
     input: string | OpenWorkspaceInput,

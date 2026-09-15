@@ -45,9 +45,10 @@ notifications even when the new conversation receives a different
 `workspaceId`. Calling `task_get` on a terminal task acknowledges its
 notification. There is deliberately no task-list operation.
 
-`devspace-log meta <runId>` remains available as a low-level diagnostic view.
-While a durable task is running, it reads `task.json`; after completion it reads
-`meta.json`.
+`devspace-log meta <runId>` is the compact status view. While a durable task is
+running, it projects the useful state from `task.json`; after completion it
+projects the useful fields from `meta.json`. Use `devspace-log meta-full
+<runId>` only when command/cwd/path/PID/hash-level diagnostics are needed.
 
 Interactive/TTY commands keep the existing process-session path and may return
 a `sessionId`. `process_status` is non-blocking for those sessions, and
@@ -63,6 +64,7 @@ devspace-log tail <runId> [lines]
 devspace-log grep <runId> <pattern>
 devspace-log bytes <runId> <offset> <length>
 devspace-log meta <runId>
+devspace-log meta-full <runId>
 ```
 
 `exec_command` handles these `devspace-log` forms internally; they are not

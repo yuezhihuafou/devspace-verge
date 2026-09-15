@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { handleRunLogCommand } from "./compact-runtime/run-log-access.js";
@@ -35,7 +35,37 @@ try {
   );
   const meta = JSON.parse(await handleRunLogCommand(`devspace-log meta ${success.runId}`) as string);
   assert.equal(meta.exitCode, 0);
-  assert.equal(await readFile(meta.outputPath, "utf8"), "alpha\nbeta\ngamma");
+  assert.equal(meta.command, undefined);
+  assert.equal(meta.outputPath, undefined);
+  const fullMeta = JSON.parse(await handleRunLogCommand(`devspace-log meta-full ${success.runId}`) as string);
+  assert.equal(await readFile(fullMeta.outputPath, "utf8"), "alpha\nbeta\ngamma");
+
+  const activeRunId = "run_20260915000000_active";
+  const activeRunDir = path.join(root, "2026-09-15", activeRunId);
+  await mkdir(activeRunDir, { recursive: true });
+  await writeFile(path.join(activeRunDir, "output.log"), "still-running\n");
+  await writeFile(path.join(activeRunDir, "task.json"), JSON.stringify({
+    schemaVersion: 2,
+    runId: activeRunId,
+    taskId: "task_11111111-1111-4111-8111-111111111111",
+    status: "working",
+    lastUpdatedAt: new Date().toISOString(),
+  }));
+  const activeMeta = JSON.parse(await handleRunLogCommand(`devspace-log meta ${activeRunId}`) as string);
+  assert.equal(activeMeta.status, "working");
+  assert.equal(activeMeta.running, true);
+
+  await writeFile(path.join(activeRunDir, "task.json"), JSON.stringify({
+    schemaVersion: 2,
+    runId: activeRunId,
+    taskId: "task_11111111-1111-4111-8111-111111111111",
+    status: "working",
+    lastUpdatedAt: new Date(Date.now() - 120_000).toISOString(),
+  }));
+  const staleMeta = JSON.parse(await handleRunLogCommand(`devspace-log meta ${activeRunId}`) as string);
+  assert.equal(staleMeta.status, "unknown");
+  assert.equal(staleMeta.running, false);
+  assert.equal(staleMeta.stale, true);
 
   const failure = await persistShellRun({
     input: { command: "sh -c 'echo boom; exit 7'" },

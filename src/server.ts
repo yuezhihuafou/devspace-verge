@@ -455,6 +455,7 @@ function registerMcpSurface(
     },
     async ({ path, mode, baseRef }, { _meta }) => {
       const startedAt = performance.now();
+      const conversationScopeId = conversationScopeIdFromRequestMeta(_meta);
       const {
         workspace,
         agentsFiles,
@@ -463,7 +464,7 @@ function registerMcpSurface(
         includeBootstrapContext,
       } = await workspaces.openWorkspace(
         { path, mode, baseRef },
-        { conversationScopeId: conversationScopeIdFromRequestMeta(_meta) },
+        { conversationScopeId },
       );
       const review = await reviewCheckpoints.initializeWorkspace({
         workspaceId: workspace.id,
@@ -516,7 +517,13 @@ function registerMcpSurface(
       const visibleSkills = includeBootstrapContext ? cardSkills : [];
       const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
       const visibleAgents = includeBootstrapContext ? cardAgents : [];
-      const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
+      const dedupedAgents = includeBootstrapContext
+        ? workspaces.dedupeConversationAgentsFiles(conversationScopeId, workspace.root, agentsFiles)
+        : { files: [], reusedPaths: [] };
+      const loadedAgentsFiles = dedupedAgents.files.map((file) => ({
+        path: formatAgentsPath(file.path, workspace.root),
+        content: file.content,
+      }));
       const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
       const cardInstruction = config.skillsEnabled
         ? "Use this workspaceId for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
@@ -550,6 +557,9 @@ function registerMcpSurface(
             `Mode: ${workspace.mode}`,
             loadedAgentsFiles.length > 0
               ? `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
+              : undefined,
+            dedupedAgents.reusedPaths.length > 0
+              ? `Unchanged workspace instructions already loaded in this conversation remain in force: ${dedupedAgents.reusedPaths.join(", ")}. If their text is not present in current context, read those paths before continuing.`
               : undefined,
             availableAgentsFileOutputs.length > 0
               ? `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
@@ -666,10 +676,10 @@ function registerMcpSurface(
           .number()
           .int()
           .positive()
+          .max(500)
           .optional()
-          .describe("Maximum number of lines to read."),
+          .describe("Lines to read (max 500). Defaults to 250; continue with offset for more."),
       },
-      outputSchema: resultOutputSchema(),
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, ...input }) => {
@@ -677,7 +687,7 @@ function registerMcpSurface(
       const workspace = await workspaces.getWorkspace(workspaceId);
       const readPath = workspaces.resolveReadPath(workspace, input.path);
       const response = await readFileTool(
-        { ...input, path: readPath.absolutePath },
+        { ...input, path: readPath.absolutePath, limit: input.limit ?? 250 },
         {
           cwd: workspace.root,
           root: workspace.root,

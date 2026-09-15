@@ -82,6 +82,110 @@ test("codex process tools keep wait and output budgets server-managed", async (t
   }
 });
 
+test("codex tool surface stays compact without dropping capabilities", async (t) => {
+  const semantic = new SerenaSemanticManager({
+    available: true,
+    createClient: async () => ({
+      callTool: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      close: async () => undefined,
+    }),
+  });
+  const context = await fixture(t, { toolMode: "codex", semantic });
+  const tools = await context.client.listTools();
+  const names = tools.tools.map((tool) => tool.name);
+  for (const required of [
+    "open_workspace", "read", "apply_patch", "exec_command",
+    "task_get", "task_update", "task_cancel", "process_status", "write_stdin",
+    "semantic_code", "semantic_edit", "show_changes",
+  ]) {
+    assert.ok(names.includes(required), `${required} capability should remain exposed`);
+  }
+  const codexOwned = new Set([
+    "apply_patch", "exec_command", "task_get", "task_update", "task_cancel",
+    "process_status", "write_stdin", "semantic_code", "semantic_edit",
+  ]);
+  for (const tool of tools.tools.filter((candidate) => codexOwned.has(candidate.name))) {
+    assert.equal(tool.outputSchema, undefined, `${tool.name} should not spend model context on redundant output schema`);
+  }
+  const totalBytes = tools.tools.reduce(
+    (sum, tool) => sum + Buffer.byteLength(JSON.stringify(tool), "utf8"),
+    0,
+  );
+  assert.ok(totalBytes <= 14_500, `Codex+Serena tool schema grew to ${totalBytes} bytes`);
+  await semantic.close();
+});
+
+test("codex common command responses stay compact and keep retrieval handles", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true });
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const response = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId: opened.workspaceId, cmd: "printf 'compact-ok\\n'" },
+  });
+  const structured = structuredContent(response);
+  assert.equal(structured.exitCode, 0);
+  assert.equal(typeof structured.runId, "string");
+  assert.equal(structured.taskId, undefined);
+  assert.doesNotMatch(contentText(response), /devspace-log (?:meta|read|grep|tail)/);
+  const bytes = Buffer.byteLength(JSON.stringify(response), "utf8");
+  assert.ok(bytes <= 500, `Common exec response grew to ${bytes} bytes`);
+});
+
+test("read defaults to bounded pagination without losing access to later lines", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const lines = Array.from({ length: 700 }, (_, index) => `line-${index + 1}`);
+  await writeFile(join(context.project, "large.txt"), `${lines.join("\n")}\n`);
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const first = await context.client.callTool({
+    name: "read",
+    arguments: { workspaceId: opened.workspaceId, path: "large.txt" },
+  });
+  const firstText = contentText(first);
+  assert.match(firstText, /^line-1\n/);
+  assert.match(firstText, /line-250/);
+  assert.doesNotMatch(firstText, /line-251(?:\n|$)/);
+  assert.match(firstText, /Use offset=251 to continue/);
+
+  const second = await context.client.callTool({
+    name: "read",
+    arguments: { workspaceId: opened.workspaceId, path: "large.txt", offset: 251, limit: 500 },
+  });
+  const secondText = contentText(second);
+  assert.match(secondText, /^line-251\n/);
+  assert.match(secondText, /line-700/);
+});
+
+test("open_workspace deduplicates only unchanged instructions within one conversation", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", git: true });
+  const conversationScopeId = "instruction-dedupe-scope";
+  const initial = structuredContent(await callOpen(context.client, context.project, conversationScopeId));
+  const initialFiles = initial.agentsFiles as Array<{ path: string; content: string }> | undefined;
+  assert.ok(initialFiles?.some((file) => file.path === "AGENTS.md" && file.content === "project instructions\n"));
+
+  const unchangedWorktree = await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: context.project, mode: "worktree" },
+    _meta: { "openai/session": conversationScopeId },
+  } as Parameters<Client["callTool"]>[0]);
+  const unchanged = structuredContent(unchangedWorktree);
+  const unchangedFiles = unchanged.agentsFiles as Array<{ path: string; content: string }> | undefined;
+  assert.equal(unchangedFiles?.some((file) => file.path === "AGENTS.md"), false);
+  assert.match(contentText(unchangedWorktree), /Unchanged workspace instructions already loaded in this conversation remain in force/);
+  assert.match(contentText(unchangedWorktree), /read those paths before continuing/);
+
+  await writeFile(join(context.project, "AGENTS.md"), "changed project instructions\n");
+  await git(context.project, ["add", "AGENTS.md"]);
+  await git(context.project, ["commit", "-m", "Change instructions"]);
+  const changedWorktree = await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: context.project, mode: "worktree" },
+    _meta: { "openai/session": conversationScopeId },
+  } as Parameters<Client["callTool"]>[0]);
+  const changed = structuredContent(changedWorktree);
+  const changedFiles = changed.agentsFiles as Array<{ path: string; content: string }> | undefined;
+  assert.ok(changedFiles?.some((file) => file.path === "AGENTS.md" && file.content === "changed project instructions\n"));
+});
+
 test("codex devspace-log responses satisfy the process output schema", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   const opened = structuredContent(await callOpen(context.client, context.project));
