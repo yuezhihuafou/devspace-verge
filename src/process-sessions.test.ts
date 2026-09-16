@@ -89,13 +89,16 @@ assert.match(completed.output, /finished/);
 const statusTarget = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),
-  command: `${node} -e "setTimeout(() => console.log('status-output'), 30); setTimeout(() => process.exit(0), 120)"`,
+  command: `${node} -e "setTimeout(() => console.log('status-output'), 30); setTimeout(() => process.exit(0), 500)"`,
   yieldTimeMs: 5,
 });
 assert.equal(statusTarget.running, true);
 assert.ok(statusTarget.sessionId);
-await new Promise((resolve) => setTimeout(resolve, 60));
-const statusSnapshot = manager.status("workspace-a", statusTarget.sessionId);
+let statusSnapshot = manager.status("workspace-a", statusTarget.sessionId);
+for (let attempt = 0; attempt < 100 && statusSnapshot.outputBytes === 0; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  statusSnapshot = manager.status("workspace-a", statusTarget.sessionId);
+}
 assert.equal(statusSnapshot.running, true);
 assert.equal(statusSnapshot.sessionId, statusTarget.sessionId);
 assert.ok(statusSnapshot.outputBytes > 0);
@@ -107,7 +110,13 @@ const statusOutput = await manager.write({
 });
 assert.equal(statusOutput.running, true);
 assert.match(statusOutput.output, /status-output/);
-await new Promise((resolve) => setTimeout(resolve, 100));
+const statusCompletion = await manager.write({
+  workspaceId: "workspace-a",
+  sessionId: statusTarget.sessionId,
+  yieldTimeMs: 2_000,
+});
+assert.equal(statusCompletion.running, false);
+assert.equal(statusCompletion.exitCode, 0);
 const completedStatus = manager.status("workspace-a", statusTarget.sessionId);
 assert.equal(completedStatus.running, false);
 assert.equal(completedStatus.exitCode, 0);
