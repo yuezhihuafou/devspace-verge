@@ -1,26 +1,38 @@
 # Setup Guide
 
-This guide covers ChatGPT and Coding Agents using DevSpace with local projects.
+This guide covers ChatGPT and Coding Agents using DevSpace Verge with local projects.
 
 ## Requirements
 
 - Node `>=22.19 <27`
-- npm
+- pnpm `11.25.0`
 - Git
 - Bash, including Git Bash or WSL on Windows
 - a public HTTPS URL that forwards to the local DevSpace server, only when
   ChatGPT will connect
 
-DevSpace does not create the public tunnel for you. ChatGPT users can use
+DevSpace Verge does not create the public tunnel for you. ChatGPT users can use
 Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or their own HTTPS reverse
 proxy.
 
 ## Install And Configure
 
-Run:
+Verge is currently distributed from its GitHub repository rather than npm:
 
 ```bash
-npx @waishnav/devspace init
+git clone https://github.com/yuezhihuafou/devspace-verge.git
+cd devspace-verge
+corepack enable
+corepack prepare pnpm@11.25.0 --activate
+pnpm install --frozen-lockfile
+pnpm build
+npm link
+```
+
+Then initialize it:
+
+```bash
+devspace init
 ```
 
 The setup flow asks one question at a time.
@@ -58,10 +70,10 @@ Setup detects supported Coding Agents and asks which ones DevSpace may use.
 These choices are stored as provider objects under `subagents` in
 `~/.devspace/config.jsonc`.
 
-If you selected Coding Agents, setup prints:
+If you selected Coding Agents, install the Verge subagents skill from GitHub:
 
 ```bash
-npx skills add Waishnav/devspace --skill subagents --global
+npx skills add yuezhihuafou/devspace-verge --skill subagents --global
 ```
 
 The Skills CLI asks which installed Coding Agents should receive the skill.
@@ -115,14 +127,14 @@ A Coding Agents-only setup skips this section.
 Run:
 
 ```bash
-npx @waishnav/devspace serve
+devspace serve
 ```
 
 If your tunnel URL changes, update the persisted value before starting:
 
 ```bash
-npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
-npx @waishnav/devspace serve
+devspace config set publicBaseUrl https://devspace.example.com
+devspace serve
 ```
 
 ## Approve The Client
@@ -144,7 +156,7 @@ Keep `auth.json` private.
 Run:
 
 ```bash
-npx @waishnav/devspace doctor
+devspace doctor
 ```
 
 The doctor command reports the resolved config, Node version, Node ABI, platform,
@@ -152,10 +164,7 @@ Git, Bash, public URL, allowed hosts, and SQLite native dependency status.
 
 ## Running From A Local Checkout
 
-If you are developing DevSpace itself instead of using the published package:
-
-Local checkout development additionally requires pnpm 11.25.0, the version
-pinned in `package.json`. Install it with `npm install --global pnpm@11.25.0`.
+Local checkout development uses the pnpm version pinned in `package.json`:
 
 ```bash
 pnpm install --frozen-lockfile

@@ -64,12 +64,13 @@ test("durable task manager returns promptly and run logs become queryable", asyn
   const root = await mkdtemp(path.join(tmpdir(), "devspace-durable-manager-"));
   const previousRoot = process.env.DEVSPACE_COMPACT_RUN_ROOT;
   process.env.DEVSPACE_COMPACT_RUN_ROOT = root;
+  let runner: Promise<number> | undefined;
   try {
     const manager = new DurableTaskManager({
       runRoot: root,
       runnerPath: "test-runner",
       launchTask: async ({ requestPath }) => {
-        void runDurableTask(requestPath);
+        runner = runDurableTask(requestPath);
       },
     });
     const snapshot = await manager.start({
@@ -88,7 +89,8 @@ test("durable task manager returns promptly and run logs become queryable", asyn
     assert.equal(working.status, "working");
     assert.ok((working.pollIntervalMs ?? 0) > 0);
 
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.ok(runner);
+    assert.equal(await runner, 0);
     const meta = JSON.parse(await handleRunLogCommand(`devspace-log meta ${snapshot.runId}`) as string) as {
       exitCode: number;
       isError: boolean;
@@ -103,6 +105,7 @@ test("durable task manager returns promptly and run logs become queryable", asyn
     assert.match(output as string, /durable-start/);
     assert.match(output as string, /durable-done/);
   } finally {
+    await runner?.catch(() => undefined);
     if (previousRoot === undefined) delete process.env.DEVSPACE_COMPACT_RUN_ROOT;
     else process.env.DEVSPACE_COMPACT_RUN_ROOT = previousRoot;
     await rm(root, { recursive: true, force: true });

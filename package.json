@@ -1,11 +1,15 @@
 {
-  "name": "@waishnav/devspace",
-  "version": "1.0.8",
+  "name": "devspace-verge",
+  "version": "0.1.0",
   "private": true,
-  "description": "Expose a secure local coding workspace through an MCP server.",
+  "description": "Agent-optimized DevSpace derivative with compact MCP output, durable tasks, and semantic code tooling.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Waishnav/devspace.git"
+    "url": "git+https://github.com/yuezhihuafou/devspace-verge.git"
+  },
+  "homepage": "https://github.com/yuezhihuafou/devspace-verge#readme",
+  "bugs": {
+    "url": "https://github.com/yuezhihuafou/devspace-verge/issues"
   },
   "type": "module",
   "main": "dist/server.js",
@@ -25,6 +29,8 @@
     "schema",
     "scripts",
     "skills",
+    "LICENSE",
+    "NOTICE",
     "README.md"
   ],
   "scripts": {
@@ -42,8 +48,15 @@
     "test:package-install": "tsx --test --test-concurrency=1 \"test/package-install-smoke.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "mcp",
+    "coding-agent",
+    "developer-tools",
+    "chatgpt",
+    "codex",
+    "devspace"
+  ],
+  "author": "yuezhihuafou",
   "license": "MIT",
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.1.0",
