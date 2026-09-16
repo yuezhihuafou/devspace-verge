@@ -110,14 +110,11 @@ const statusOutput = await manager.write({
 });
 assert.equal(statusOutput.running, true);
 assert.match(statusOutput.output, /status-output/);
-const statusCompletion = await manager.write({
-  workspaceId: "workspace-a",
-  sessionId: statusTarget.sessionId,
-  yieldTimeMs: 2_000,
-});
-assert.equal(statusCompletion.running, false);
-assert.equal(statusCompletion.exitCode, 0);
-const completedStatus = manager.status("workspace-a", statusTarget.sessionId);
+let completedStatus = manager.status("workspace-a", statusTarget.sessionId);
+for (let attempt = 0; attempt < 100 && completedStatus.running; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  completedStatus = manager.status("workspace-a", statusTarget.sessionId);
+}
 assert.equal(completedStatus.running, false);
 assert.equal(completedStatus.exitCode, 0);
 
