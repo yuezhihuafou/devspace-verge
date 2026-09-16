@@ -4,14 +4,21 @@ This page collects the setup issues users are most likely to hit.
 
 ## `devspace` Command Not Found
 
-Use `npx`:
+DevSpace Verge is currently installed from its GitHub checkout. Build and link it:
 
 ```bash
-npx @waishnav/devspace init
-npx @waishnav/devspace serve
+pnpm install --frozen-lockfile
+pnpm build
+npm link
 ```
 
-If you installed globally, confirm npm's global bin directory is on `PATH`.
+Then verify:
+
+```bash
+devspace doctor
+```
+
+If the command is still missing, confirm npm's global bin directory is on `PATH`.
 
 ## Unsupported Node Version
 
@@ -40,7 +47,7 @@ npm rebuild better-sqlite3
 Then run:
 
 ```bash
-npx @waishnav/devspace doctor
+devspace doctor
 ```
 
 Release starts run a native dependency check before launching.
@@ -62,7 +69,7 @@ https://your-tunnel-host.example.com/mcp
 If you saved the wrong value:
 
 ```bash
-npx @waishnav/devspace config set publicBaseUrl https://your-tunnel-host.example.com
+devspace config set publicBaseUrl https://your-tunnel-host.example.com
 ```
 
 ## Tailscale Funnel `/mcp` Returns 404
@@ -85,13 +92,13 @@ Temporary tunnels often change URLs between runs.
 Update the configured URL:
 
 ```bash
-npx @waishnav/devspace config set publicBaseUrl https://new-tunnel.example.com
+devspace config set publicBaseUrl https://new-tunnel.example.com
 ```
 
 For a stable URL:
 
 ```bash
-npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
+devspace config set publicBaseUrl https://devspace.example.com
 ```
 
 ## Host Header Or 403 Problems
@@ -101,7 +108,7 @@ DevSpace derives allowed hosts from the configured public URL.
 Run:
 
 ```bash
-npx @waishnav/devspace doctor
+devspace doctor
 ```
 
 Confirm the public URL hostname appears in allowed hosts. If you changed tunnel
@@ -134,7 +141,7 @@ Make sure you are entering the Owner password from:
 To regenerate setup:
 
 ```bash
-npx @waishnav/devspace init --force
+devspace init --force
 ```
 
 ## Unknown `workspaceId`
@@ -170,13 +177,13 @@ the current local project and are not gated by MCP allowed roots.
 Run:
 
 ```bash
-npx @waishnav/devspace config get
+devspace config get
 ```
 
 Then either open a project under an allowed root or rerun setup:
 
 ```bash
-npx @waishnav/devspace init --force
+devspace init --force
 ```
 
 ## Worktree Mode Fails
@@ -204,7 +211,7 @@ Install Git for Windows and use Git Bash, or use WSL, MSYS2, or Cygwin Bash.
 Run:
 
 ```bash
-npx @waishnav/devspace doctor
+devspace doctor
 ```
 
 Confirm Bash is detected.
@@ -243,11 +250,10 @@ advertises the skill and the model reads it only when useful. Set it to
 `preload` to include the workflow directly in the initial workspace
 instructions instead.
 
-For a Coding Agent, run the installation command printed by
-`devspace init`:
+For a Coding Agent, install the Verge skill directly from its GitHub repository:
 
 ```bash
-npx skills add Waishnav/devspace --skill subagents --global
+npx skills add yuezhihuafou/devspace-verge --skill subagents --global
 ```
 
 The Skills CLI handles agent discovery and installation. DevSpace setup does
