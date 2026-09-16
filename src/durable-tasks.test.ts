@@ -89,7 +89,8 @@ test("durable task manager returns promptly and run logs become queryable", asyn
     assert.equal(working.status, "working");
     assert.ok((working.pollIntervalMs ?? 0) > 0);
 
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.ok(runner);
+    assert.equal(await runner, 0);
     const meta = JSON.parse(await handleRunLogCommand(`devspace-log meta ${snapshot.runId}`) as string) as {
       exitCode: number;
       isError: boolean;
