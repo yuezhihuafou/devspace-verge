@@ -1,0 +1,16 @@
+DevSpace Verge
+Copyright (c) 2026 yuezhihuafou
+
+This project is an independently maintained derivative of DevSpace by Waishnav
+and contributors:
+https://github.com/Waishnav/devspace
+
+The upstream DevSpace source is licensed under the MIT License. The original
+copyright and permission notice are preserved in this repository's LICENSE file.
+
+DevSpace Verge contains substantial modifications for agent-oriented operation,
+including compact model-facing command output, persistent command logs, durable
+long-running tasks, semantic code tooling, and related reliability work.
+
+DevSpace Verge is not an official DevSpace release and is not endorsed by the
+upstream project.
