@@ -42,6 +42,12 @@ Verge is usable, but it is still an early independent release line. The first
 Verge release starts at `0.1.0`; this version number is intentionally separate
 from upstream DevSpace's release numbering.
 
+Linux is the primary production and release-gated environment. macOS is part of
+the blocking pull-request smoke matrix. Windows remains a compatibility signal:
+the inherited runtime is exercised there, but known Windows-specific command
+shell and lifecycle differences mean the full Windows suite is not yet a release
+gate.
+
 ## Requirements
 
 - Node.js `>=22.19 <27`
@@ -49,9 +55,9 @@ from upstream DevSpace's release numbering.
 - Git
 - a Bash-compatible shell for the existing cross-platform workflow
 
-Linux is the primary production environment. macOS and Windows environments
-supported by the inherited DevSpace runtime should continue to use the same
-compatibility requirements documented upstream.
+For the supported release path, use Linux. macOS is continuously smoke-tested.
+Windows should currently be treated as best-effort compatibility rather than a
+fully supported production target.
 
 ## Install from source
 
