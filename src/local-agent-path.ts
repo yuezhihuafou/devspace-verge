@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, resolve, sep } from "node:path";
 
+const DEVSPACE_PACKAGE_NAMES = new Set([
+  "devspace-verge",
+  "@waishnav/devspace",
+]);
+
 export function removeDevspaceNodeModulesBinFromPath(pathValue: string): string {
   return pathValue
     .split(delimiter)
@@ -19,7 +24,7 @@ function isDevspaceNodeModulesBin(pathEntry: string): boolean {
 
   try {
     const packageInfo = JSON.parse(readFileSync(packageJson, "utf8")) as { name?: unknown };
-    return packageInfo.name === "@waishnav/devspace";
+    return typeof packageInfo.name === "string" && DEVSPACE_PACKAGE_NAMES.has(packageInfo.name);
   } catch {
     return false;
   }
