@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
-import { SerenaSemanticManager } from "./serena-semantic.js";
+import { SERENA_STDERR_MODE, SerenaSemanticManager } from "./serena-semantic.js";
+
+test("Serena stderr cannot use an unread pipe", () => {
+  assert.equal(SERENA_STDERR_MODE, "inherit");
+});
 
 test("Serena semantic backends use bounded LRU reuse", async () => {
   const created: string[] = [];
