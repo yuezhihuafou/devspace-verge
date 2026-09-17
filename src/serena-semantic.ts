@@ -18,6 +18,10 @@ export interface SerenaSemanticManagerOptions {
   maxBackends?: number;
 }
 
+// Keep Serena stderr attached to the DevSpace service rather than an unread pipe.
+// An unread child-process pipe can fill and deadlock the semantic backend.
+export const SERENA_STDERR_MODE = "inherit" as const;
+
 function installed(): boolean {
   const result = spawnSync("serena", ["--version"], { stdio: "ignore", windowsHide: true, timeout: 2_000 });
   return !result.error && result.status === 0;
@@ -59,9 +63,7 @@ async function createClient(root: string): Promise<SerenaClientLike> {
     env: Object.fromEntries(
       Object.entries({ ...process.env, SERENA_HOME: serenaHome }).filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),
-    // Do not leave an unread stderr pipe: a chatty backend can fill the pipe,
-    // block the child process, and make the whole semantic session appear hung.
-    stderr: "inherit",
+    stderr: SERENA_STDERR_MODE,
   });
   const client = new Client({ name: "devspace-serena-backend", version: "1" });
   let timer: NodeJS.Timeout | undefined;
