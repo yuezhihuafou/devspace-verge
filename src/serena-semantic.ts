@@ -59,7 +59,9 @@ async function createClient(root: string): Promise<SerenaClientLike> {
     env: Object.fromEntries(
       Object.entries({ ...process.env, SERENA_HOME: serenaHome }).filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),
-    stderr: "pipe",
+    // Do not leave an unread stderr pipe: a chatty backend can fill the pipe,
+    // block the child process, and make the whole semantic session appear hung.
+    stderr: "inherit",
   });
   const client = new Client({ name: "devspace-serena-backend", version: "1" });
   let timer: NodeJS.Timeout | undefined;
