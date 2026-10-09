@@ -195,7 +195,7 @@ function testTransactionalTokenRotation(stateDir: string): void {
 
 async function testAuthorizationCodeSurvivesRestart(stateDir: string): Promise<void> {
   const first = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
-  const client = first.clientsStore.registerClient?.({
+  const client = await first.clientsStore.registerClient?.({
     redirect_uris: [redirectUri], client_name: "ChatGPT",
   });
   assert.ok(client);
