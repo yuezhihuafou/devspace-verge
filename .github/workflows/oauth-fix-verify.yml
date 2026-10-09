@@ -21,7 +21,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Typecheck
         run: pnpm typecheck
-      - name: OAuth regression tests
-        run: pnpm exec tsx --test src/oauth-store.test.ts src/server-oauth.test.ts
+      - name: Install Pi sandbox test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap socat
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Full test suite
+        env:
+          DEVSPACE_REQUIRE_PI_SANDBOX: "1"
+        run: pnpm test
+      - name: Package install smoke
+        run: pnpm test:package-install
       - name: Build
         run: pnpm build
