@@ -53,6 +53,16 @@ try {
   assert.equal(existsSync(join(devRoot, "config", "auth.json")), true);
   assert.equal(existsSync(join(devRoot, "config", "skills", "example", "SKILL.md")), true);
 
+  // An old QA fork must not silently impersonate production and rotate
+  // refresh tokens in a separate database.
+  const qaConfigPath = join(devRoot, "config", "config.jsonc");
+  const safeConfig = await readFile(qaConfigPath, "utf8");
+  const unsafeConfig = JSON.parse(safeConfig) as { server: { publicBaseUrl: string } };
+  unsafeConfig.server.publicBaseUrl = "https://production.example.com";
+  await writeFile(qaConfigPath, JSON.stringify(unsafeConfig));
+  await assert.rejects(runDevLauncher(), /Refusing to run a QA OAuth database fork/);
+  await writeFile(qaConfigPath, safeConfig);
+
   const localDatabasePath = join(devRoot, "state", "devspace.sqlite");
   const localDatabase = new Database(localDatabasePath);
   assert.equal(localDatabase.prepare("select value from marker").pluck().get(), "source");
@@ -119,6 +129,29 @@ async function runDevState(command: "seed" | "reset"): Promise<void> {
     child.once("close", (code) => {
       if (code === 0) resolve();
       else reject(new Error(stderr || `dev-state exited with ${code}`));
+    });
+  });
+}
+
+async function runDevLauncher(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const devPath = fileURLToPath(new URL("../scripts/dev.ts", import.meta.url));
+    const child = spawn(process.execPath, [tsxCliPath, devPath], {
+      cwd: checkoutRoot,
+      env: {
+        ...process.env,
+        DEVSPACE_CONFIG_DIR: sourceConfigDir,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr || `dev launcher exited with ${code}`));
     });
   });
 }
