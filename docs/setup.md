@@ -173,5 +173,6 @@ pnpm dev
 ```
 
 The source server uses an ignored checkout-local fork of your normal DevSpace
-configuration and SQLite state. See [Development and Manual QA](development.md)
+configuration and SQLite state. It uses an isolated loopback OAuth origin and
+does not copy live OAuth tokens into the QA database. See [Development and Manual QA](development.md)
 for worktree switching, ChatGPT testing, and database migration workflows.

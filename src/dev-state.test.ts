@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { openDatabase } from "./db/client.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-dev-state-test-"));
 const checkoutRoot = join(root, "checkout");
@@ -20,6 +21,7 @@ try {
   await mkdir(sourceStateDir, { recursive: true });
   await writeFile(join(sourceConfigDir, "config.jsonc"), JSON.stringify({
     configVersion: 1,
+    server: { publicBaseUrl: "https://production.example.com", port: 7676 },
     storage: { stateDir: sourceStateDir },
   }));
   await writeFile(join(sourceConfigDir, "auth.json"), JSON.stringify({
@@ -27,8 +29,12 @@ try {
   }));
   await writeFile(join(sourceConfigDir, "skills", "example", "SKILL.md"), "example skill\n");
 
-  const sourceDatabase = new Database(join(sourceStateDir, "devspace.sqlite"));
-  sourceDatabase.exec("create table marker (value text); insert into marker values ('source')");
+  const sourceDatabase = openDatabase(sourceStateDir);
+  sourceDatabase.sqlite.exec("create table marker (value text); insert into marker values ('source')");
+  sourceDatabase.sqlite.prepare("insert into oauth_clients (client_id, client_json, issued_at) values (?, ?, ?)")
+    .run("production-client", JSON.stringify({ client_id: "production-client", redirect_uris: [] }), 1);
+  sourceDatabase.sqlite.prepare("insert into oauth_refresh_tokens (token_hash, client_id, scopes_json, expires_at, resource) values (?, ?, ?, ?, ?)")
+    .run("production-token-hash", "production-client", "[]", 4102444800, "https://production.example.com/mcp");
   sourceDatabase.close();
 
   await runDevState("seed");
@@ -36,17 +42,22 @@ try {
   const devRoot = join(checkoutRoot, ".devspace-dev");
   const localConfig = JSON.parse(
     await readFile(join(devRoot, "config", "config.jsonc"), "utf8"),
-  ) as { storage: { stateDir: string } };
+  ) as { storage: { stateDir: string }; server: { publicBaseUrl: string; port: number }; oauth: { allowedResourceUrls: string[] } };
   assert.equal(
     await realpath(localConfig.storage.stateDir),
     await realpath(join(devRoot, "state")),
   );
+  assert.equal(localConfig.server.publicBaseUrl, "http://127.0.0.1:8676");
+  assert.equal(localConfig.server.port, 8676);
+  assert.deepEqual(localConfig.oauth.allowedResourceUrls, []);
   assert.equal(existsSync(join(devRoot, "config", "auth.json")), true);
   assert.equal(existsSync(join(devRoot, "config", "skills", "example", "SKILL.md")), true);
 
   const localDatabasePath = join(devRoot, "state", "devspace.sqlite");
   const localDatabase = new Database(localDatabasePath);
   assert.equal(localDatabase.prepare("select value from marker").pluck().get(), "source");
+  assert.equal(localDatabase.prepare("select count(*) from oauth_clients").pluck().get(), 0);
+  assert.equal(localDatabase.prepare("select count(*) from oauth_refresh_tokens").pluck().get(), 0);
   localDatabase.exec("insert into marker values ('local-only')");
   localDatabase.close();
 
@@ -72,7 +83,13 @@ try {
 
   const resetDatabase = new Database(localDatabasePath, { readonly: true });
   assert.deepEqual(resetDatabase.prepare("select value from marker order by rowid").pluck().all(), ["source"]);
+  assert.equal(resetDatabase.prepare("select count(*) from oauth_clients").pluck().get(), 0);
   resetDatabase.close();
+
+  const productionDatabase = new Database(join(sourceStateDir, "devspace.sqlite"), { readonly: true });
+  assert.equal(productionDatabase.prepare("select count(*) from oauth_clients").pluck().get(), 1);
+  assert.equal(productionDatabase.prepare("select count(*) from oauth_refresh_tokens").pluck().get(), 1);
+  productionDatabase.close();
 } finally {
   await rm(root, { recursive: true, force: true });
 }
