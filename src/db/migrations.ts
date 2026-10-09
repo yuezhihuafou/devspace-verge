@@ -42,6 +42,11 @@ const migrations: Migration[] = [
     name: "workspace-recovery-state",
     up: migrateWorkspaceRecoveryState,
   },
+  {
+    version: 8,
+    name: "oauth-authorization-codes",
+    up: migrateOAuthAuthorizationCodes,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -171,6 +176,23 @@ function migrateOAuthState(sqlite: Database.Database): void {
 
     create index if not exists oauth_refresh_tokens_expires_at_idx
       on oauth_refresh_tokens(expires_at);
+  `);
+}
+
+function migrateOAuthAuthorizationCodes(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists oauth_authorization_codes (
+      code_hash text primary key,
+      client_id text not null,
+      redirect_uri text not null,
+      code_challenge text not null,
+      scopes_json text not null,
+      resource text,
+      expires_at_ms integer not null,
+      foreign key (client_id) references oauth_clients(client_id) on delete cascade
+    );
+    create index if not exists oauth_authorization_codes_expires_at_idx
+      on oauth_authorization_codes(expires_at_ms);
   `);
 }
 

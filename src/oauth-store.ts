@@ -18,6 +18,15 @@ export interface PersistedRefreshTokenRecord {
   resource?: string;
 }
 
+export interface PersistedAuthorizationCodeRecord {
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  scopes: string[];
+  resource?: string;
+  expiresAtMs: number;
+}
+
 export interface PersistedTokenPair {
   accessTokenHash: string;
   accessToken: PersistedAccessTokenRecord;
@@ -76,6 +85,45 @@ export class SqliteOAuthStore {
       .run(registered.client_id, JSON.stringify(registered), now);
 
     return registered;
+  }
+
+  saveAuthorizationCode(codeHash: string, record: PersistedAuthorizationCodeRecord): void {
+    this.database.sqlite
+      .prepare("insert into oauth_authorization_codes (code_hash, client_id, redirect_uri, code_challenge, scopes_json, resource, expires_at_ms) values (?, ?, ?, ?, ?, ?, ?)")
+      .run(codeHash, record.clientId, record.redirectUri, record.codeChallenge,
+        JSON.stringify(record.scopes), record.resource ?? null, record.expiresAtMs);
+  }
+
+  getAuthorizationCode(codeHash: string): PersistedAuthorizationCodeRecord | undefined {
+    const row = this.database.sqlite
+      .prepare("select client_id, redirect_uri, code_challenge, scopes_json, resource, expires_at_ms from oauth_authorization_codes where code_hash = ?")
+      .get(codeHash) as {
+        client_id: string;
+        redirect_uri: string;
+        code_challenge: string;
+        scopes_json: string;
+        resource: string | null;
+        expires_at_ms: number;
+      } | undefined;
+    return row ? {
+      clientId: row.client_id,
+      redirectUri: row.redirect_uri,
+      codeChallenge: row.code_challenge,
+      scopes: JSON.parse(row.scopes_json) as string[],
+      resource: row.resource ?? undefined,
+      expiresAtMs: row.expires_at_ms,
+    } : undefined;
+  }
+
+  consumeAuthorizationCode(codeHash: string): PersistedAuthorizationCodeRecord | undefined {
+    const consume = this.database.sqlite.transaction(() => {
+      const record = this.getAuthorizationCode(codeHash);
+      if (!record || record.expiresAtMs < Date.now()) return undefined;
+      const deleted = this.database.sqlite
+        .prepare("delete from oauth_authorization_codes where code_hash = ?").run(codeHash);
+      return deleted.changes === 1 ? record : undefined;
+    });
+    return consume.immediate();
   }
 
   saveAccessToken(tokenHash: string, record: PersistedAccessTokenRecord): void {
@@ -184,6 +232,7 @@ export class SqliteOAuthStore {
   private deleteExpiredTokens(nowSeconds: number): void {
     this.database.sqlite.prepare("delete from oauth_access_tokens where expires_at < ?").run(nowSeconds);
     this.database.sqlite.prepare("delete from oauth_refresh_tokens where expires_at < ?").run(nowSeconds);
+    this.database.sqlite.prepare("delete from oauth_authorization_codes where expires_at_ms < ?").run(nowSeconds * 1000);
   }
 }
 
@@ -191,10 +240,13 @@ export class SqliteOAuthClientsStore implements OAuthRegisteredClientsStore {
   constructor(
     private readonly store: SqliteOAuthStore,
     private readonly allowedRedirectHosts: string[],
+    private readonly onUnknownClient?: () => void,
   ) {}
 
   getClient(clientId: string): OAuthClientInformationFull | undefined {
-    return this.store.getClient(clientId);
+    const client = this.store.getClient(clientId);
+    if (!client) this.onUnknownClient?.();
+    return client;
   }
 
   registerClient(

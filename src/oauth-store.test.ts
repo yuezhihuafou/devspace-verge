@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Response } from "express";
 import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { databasePath, openDatabase } from "./db/client.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
@@ -26,6 +27,7 @@ try {
   testPersistenceAndTokenHashing(join(root, "persistence"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
+  await testAuthorizationCodeSurvivesRestart(join(root, "authorization-code-restart"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
   await testRefreshResourcePolicy(join(root, "refresh-policy"));
 } finally {
@@ -51,6 +53,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 5, name: "local-agent-structured-errors" },
       { version: 6, name: "local-agent-effort-rename" },
       { version: 7, name: "workspace-recovery-state" },
+      { version: 8, name: "oauth-authorization-codes" },
     ]);
   } finally {
     database.close();
@@ -190,6 +193,55 @@ function testTransactionalTokenRotation(stateDir: string): void {
   }
 }
 
+async function testAuthorizationCodeSurvivesRestart(stateDir: string): Promise<void> {
+  const first = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  const client = first.clientsStore.registerClient?.({
+    redirect_uris: [redirectUri], client_name: "ChatGPT",
+  });
+  assert.ok(client);
+  let redirected = "";
+  await first.authorize(client, {
+    redirectUri,
+    codeChallenge: "restart-pkce-challenge",
+    scopes: ["devspace"],
+    state: "test-state",
+    resource: mcpUrl,
+  }, {
+    req: { method: "POST", body: { owner_token: oauthConfig.ownerToken } },
+    redirect: (_status: number, location: string) => { redirected = location; },
+  } as unknown as Response);
+  const redirect = new URL(redirected);
+  const code = redirect.searchParams.get("code");
+  assert.ok(code);
+  assert.equal(redirect.searchParams.get("state"), "test-state");
+  first.close();
+
+  const second = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  try {
+    assert.ok(second.clientsStore.getClient(client.client_id));
+    assert.equal(await second.challengeForAuthorizationCode(client, code), "restart-pkce-challenge");
+    await assert.rejects(
+      second.exchangeAuthorizationCode(client, code, undefined, redirectUri, tunnelUrl),
+      InvalidGrantError,
+    );
+    const tokens = await second.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl);
+    assert.equal((await second.verifyAccessToken(tokens.access_token)).resource?.href, mcpUrl.href);
+    await assert.rejects(
+      second.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl),
+      InvalidGrantError,
+    );
+  } finally {
+    second.close();
+  }
+
+  const database = openDatabase(stateDir);
+  try {
+    assert.equal(database.sqlite.prepare("select count(*) from oauth_authorization_codes").pluck().get(), 0);
+  } finally {
+    database.close();
+  }
+}
+
 async function testProviderRestartRotationAndRevocation(stateDir: string): Promise<void> {
   const firstProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
   assert.equal(firstProvider.isResourceAllowed(mcpUrl), true);
@@ -204,14 +256,12 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
   assert.ok(client);
 
   const code = "code-test-123";
-  firstProvider["codes"].set(code, {
+  firstProvider["oauthStore"].saveAuthorizationCode(hashToken(code), {
     clientId: client.client_id,
-    params: {
-      redirectUri,
-      codeChallenge: "challenge",
-      scopes: ["devspace"],
-      resource: tunnelUrl,
-    },
+    redirectUri,
+    codeChallenge: "challenge",
+    scopes: ["devspace"],
+    resource: tunnelUrl.href,
     expiresAtMs: Date.now() + 60_000,
   });
   await assert.rejects(

@@ -78,6 +78,21 @@ export const oauthAccessTokens = sqliteTable(
   },
 );
 
+export const oauthAuthorizationCodes = sqliteTable(
+  "oauth_authorization_codes",
+  {
+    codeHash: text("code_hash").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    scopesJson: text("scopes_json").notNull(),
+    resource: text("resource"),
+    expiresAtMs: integer("expires_at_ms").notNull(),
+  },
+);
+
 export const oauthRefreshTokens = sqliteTable(
   "oauth_refresh_tokens",
   {

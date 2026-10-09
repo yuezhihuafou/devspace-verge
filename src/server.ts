@@ -840,7 +840,13 @@ export function createServer(
   });
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir,
+    (phase, reason) => logEvent(config.logging, "warn", "oauth_rejected", { phase, reason }));
+  logEvent(config.logging, "info", "oauth_state_ready", {
+    stateDir: config.stateDir,
+    issuer: config.publicBaseUrl,
+    resource: mcpUrl.href,
+  });
   const bearerAuth = requireBearerAuth({
     verifier: oauthProvider,
     requiredScopes: [config.oauth.scopes[0] ?? "devspace"],

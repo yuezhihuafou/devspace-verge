@@ -10,7 +10,7 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
-import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
+import { SqliteOAuthClientsStore, SqliteOAuthStore, type PersistedAuthorizationCodeRecord } from "./oauth-store.js";
 
 export interface OAuthConfig {
   ownerToken: string;
@@ -19,12 +19,6 @@ export interface OAuthConfig {
   scopes: string[];
   allowedResourceUrls: string[];
   allowedRedirectHosts: string[];
-}
-
-interface AuthorizationCodeRecord {
-  clientId: string;
-  params: AuthorizationParams;
-  expiresAtMs: number;
 }
 
 const CODE_TTL_MS = 5 * 60 * 1000;
@@ -114,7 +108,6 @@ function requestedScopesAllowed(requested: string[], supported: string[]): boole
 
 export class SingleUserOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
-  private readonly codes = new Map<string, AuthorizationCodeRecord>();
   private readonly oauthStore: SqliteOAuthStore;
   private readonly resourceServerUrl: URL;
   private readonly allowedResourceUrls: Set<string>;
@@ -123,13 +116,15 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     private readonly config: OAuthConfig,
     resourceServerUrl: URL,
     stateDir: string,
+    private readonly onRejected?: (phase: string, reason: string) => void,
   ) {
     this.resourceServerUrl = resourceUrlFromServerUrl(resourceServerUrl);
     this.allowedResourceUrls = new Set(
       config.allowedResourceUrls.map((url) => resourceUrlFromServerUrl(url).href),
     );
     this.oauthStore = new SqliteOAuthStore(stateDir);
-    this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
+    this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts,
+      () => this.onRejected?.("client", "unknown_client"));
   }
 
   async authorize(
@@ -138,9 +133,11 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     res: Response,
   ): Promise<void> {
     if (!params.resource || !this.isResourceAllowed(params.resource)) {
+      this.onRejected?.("authorize", "resource_missing_or_not_allowed");
       throw new InvalidRequestError("Invalid or missing OAuth resource");
     }
     if (!requestedScopesAllowed(params.scopes ?? [], this.config.scopes)) {
+      this.onRejected?.("authorize", "unsupported_scope");
       throw new InvalidRequestError("Requested scope is not supported");
     }
 
@@ -159,6 +156,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
 
     const providedToken = String(res.req.body?.owner_token ?? "");
     if (!safeEquals(providedToken, this.config.ownerToken)) {
+      this.onRejected?.("authorize", "owner_token_mismatch");
       res.status(401).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(
         formHtml({
@@ -173,9 +171,12 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     }
 
     const code = `code-${randomUUID()}`;
-    this.codes.set(code, {
+    this.oauthStore.saveAuthorizationCode(hashToken(code), {
       clientId: client.client_id,
-      params,
+      redirectUri: params.redirectUri,
+      codeChallenge: params.codeChallenge,
+      scopes: params.scopes ?? this.config.scopes,
+      resource: params.resource?.href,
       expiresAtMs: Date.now() + CODE_TTL_MS,
     });
 
@@ -190,7 +191,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     authorizationCode: string,
   ): Promise<string> {
     const record = this.validCodeRecord(client, authorizationCode);
-    return record.params.codeChallenge;
+    return record.codeChallenge;
   }
 
   async exchangeAuthorizationCode(
@@ -201,15 +202,23 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     resource?: URL,
   ): Promise<OAuthTokens> {
     const record = this.validCodeRecord(client, authorizationCode);
-    if (redirectUri && redirectUri !== record.params.redirectUri) {
+    if (redirectUri && redirectUri !== record.redirectUri) {
+      this.onRejected?.("authorization_code", "redirect_uri_mismatch");
       throw new InvalidGrantError("redirect_uri does not match the authorization request");
     }
-    if (resource && (!record.params.resource || !sameResource(resource, record.params.resource))) {
+    const savedResource = record.resource ? new URL(record.resource) : undefined;
+    if (!savedResource || !this.isResourceAllowed(savedResource)
+      || (resource && !sameResource(resource, savedResource))) {
+      this.onRejected?.("authorization_code", "resource_mismatch");
       throw new InvalidGrantError("Invalid resource");
     }
 
-    this.codes.delete(authorizationCode);
-    return this.issueTokens(client.client_id, record.params.scopes ?? this.config.scopes, record.params.resource);
+    const consumed = this.oauthStore.consumeAuthorizationCode(hashToken(authorizationCode));
+    if (!consumed || consumed.clientId !== client.client_id) {
+      this.onRejected?.("authorization_code", "code_already_used_or_expired");
+      throw new InvalidGrantError("Invalid authorization code");
+    }
+    return this.issueTokens(client.client_id, consumed.scopes, savedResource);
   }
 
   async exchangeRefreshToken(
@@ -220,19 +229,27 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const refreshTokenHash = hashToken(refreshToken);
     const record = this.oauthStore.getRefreshToken(refreshTokenHash);
-    if (!record || record.clientId !== client.client_id || record.expiresAt < Math.floor(Date.now() / 1000)) {
+    if (!record || record.expiresAt < Math.floor(Date.now() / 1000)) {
+      this.onRejected?.("refresh", "token_missing_or_expired");
+      throw new InvalidGrantError("Invalid refresh token");
+    }
+    if (record.clientId !== client.client_id) {
+      this.onRejected?.("refresh", "client_mismatch");
       throw new InvalidGrantError("Invalid refresh token");
     }
     const recordedResource = record.resource ? new URL(record.resource) : undefined;
     if (!recordedResource || !this.isResourceAllowed(recordedResource)) {
+      this.onRejected?.("refresh", "resource_no_longer_allowed");
       throw new InvalidGrantError("Invalid resource");
     }
     if (resource && !sameResource(resource, recordedResource)) {
+      this.onRejected?.("refresh", "resource_mismatch");
       throw new InvalidGrantError("Invalid resource");
     }
 
     const requestedScopes = scopes ?? record.scopes;
     if (!requestedScopes.every((scope) => record.scopes.includes(scope))) {
+      this.onRejected?.("refresh", "scope_escalation");
       throw new AccessDeniedError("Refresh token cannot grant requested scopes");
     }
 
@@ -247,6 +264,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const record = this.oauthStore.getAccessToken(hashToken(token));
     if (!record || record.expiresAt < Math.floor(Date.now() / 1000)) {
+      this.onRejected?.("bearer", "token_missing_or_expired");
       throw new InvalidTokenError("Invalid or expired access token");
     }
 
@@ -279,9 +297,10 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private validCodeRecord(
     client: OAuthClientInformationFull,
     authorizationCode: string,
-  ): AuthorizationCodeRecord {
-    const record = this.codes.get(authorizationCode);
+  ): PersistedAuthorizationCodeRecord {
+    const record = this.oauthStore.getAuthorizationCode(hashToken(authorizationCode));
     if (!record || record.clientId !== client.client_id || record.expiresAtMs < Date.now()) {
+      this.onRejected?.("authorization_code", "code_missing_or_expired");
       throw new InvalidGrantError("Invalid authorization code");
     }
     return record;
@@ -319,6 +338,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       consumedRefreshTokenHash,
     );
     if (!saved) {
+      this.onRejected?.("refresh", "rotation_race_or_replay");
       throw new InvalidGrantError("Invalid refresh token");
     }
 
